@@ -1,0 +1,27 @@
+# LedgerLine — Local Development Services
+# Start:  docker compose up -d
+# Stop:   docker compose down
+# Reset:  docker compose down -v  (deletes data)
+
+services:
+  db:
+    image: postgres:16.8-alpine
+    container_name: ledgerline-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ledgerline
+      POSTGRES_PASSWORD: ledgerline_dev
+      POSTGRES_DB: ledgerline
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledgerline"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

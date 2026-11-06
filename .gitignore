@@ -1,0 +1,50 @@
+# ── Environment & secrets ──
+.env
+.env.local
+.env.production
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# ── Node / Frontend ──
+node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Docker ──
+docker-compose.override.yml
+
+# ── Test / Coverage ──
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# ── Alembic ──
+# (migrations are tracked; this section is intentionally empty)
+
+# ── Misc ──
+*.log
+*.pid
