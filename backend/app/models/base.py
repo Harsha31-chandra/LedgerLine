@@ -1,8 +1,22 @@
 """
-Declarative base for SQLAlchemy models.
+Declarative base for SQLAlchemy models with explicit constraint naming conventions.
 """
+
+from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
+
+# Standard naming convention for PostgreSQL/SQLAlchemy constraints
+# Ensures consistent, deterministic constraint and index names across migrations
+naming_convention = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
 
 
 class Base(DeclarativeBase):
-    pass
+    """Base class for all SQLAlchemy 2.x models in LedgerLine."""
+
+    metadata = MetaData(naming_convention=naming_convention)

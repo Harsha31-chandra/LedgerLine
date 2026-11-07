@@ -37,9 +37,9 @@ pip install -r requirements.txt -r requirements-dev.txt
 # 4. Configure environment
 cd ..
 copy .env.example .env
-# Edit .env if needed
+# Ensure MIGRATION_DATABASE_URL and TEST_DATABASE_URL are configured
 
-# 5. Run migrations
+# 5. Run migrations (requires explicit MIGRATION_DATABASE_URL targeting ledgerline_test)
 alembic -c backend/alembic.ini upgrade head
 
 # 6. Seed demo data
@@ -82,6 +82,14 @@ npm run dev
 3. Internal transfers leave the sum of customer wallets unchanged.
 4. One idempotency key maps to at most one financial effect.
 5. Balance snapshots equal the balance derived from posted ledger entries.
+
+## Database Environment Isolation
+
+LedgerLine strictly isolates development, testing, and migration database environments:
+
+- **`DATABASE_URL`**: Used exclusively for application development runtime (`ledgerline`). Never used for tests or migration commands.
+- **`TEST_DATABASE_URL`**: Used exclusively by Pytest for automated test execution (`ledgerline_test` on `localhost:5432`). Programmatically rejects connections targeting `ledgerline`.
+- **`MIGRATION_DATABASE_URL`**: Required explicitly for all Alembic commands. Never falls back to `DATABASE_URL` or application settings. During initial development, migrations must target `ledgerline_test` on `localhost:5432`. No migration command can silently execute against the development database.
 
 ## Running Tests
 

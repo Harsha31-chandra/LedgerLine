@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://ledgerline:ledgerline_dev@localhost:5432/ledgerline"
     test_database_url: str = "postgresql://ledgerline:ledgerline_dev@localhost:5432/ledgerline_test"
+    migration_database_url: str | None = None
 
     # Session security
     session_secret: str = "change-me-to-a-random-string"
