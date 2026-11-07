@@ -91,11 +91,36 @@ LedgerLine strictly isolates development, testing, and migration database enviro
 - **`TEST_DATABASE_URL`**: Used exclusively by Pytest for automated test execution (`ledgerline_test` on `localhost:5432`). Programmatically rejects connections targeting `ledgerline`.
 - **`MIGRATION_DATABASE_URL`**: Required explicitly for all Alembic commands. Never falls back to `DATABASE_URL` or application settings. During initial development, migrations must target `ledgerline_test` on `localhost:5432`. No migration command can silently execute against the development database.
 
+## Database Schema & Migration Status
+
+- **Baseline Migration:** `7717a26bd3d3_initial_schema` ([`backend/migrations/versions/7717a26bd3d3_initial_schema.py`](backend/migrations/versions/7717a26bd3d3_initial_schema.py)).
+- **Target Database:** Verified and applied exclusively to the isolated test database `ledgerline_test`.
+- **Schema Contents:** 8 application domain tables (`users`, `sessions`, `accounts`, `account_memberships`, `transactions`, `ledger_entries`, `idempotency_records`, `audit_events`), 58 columns, 8 foreign keys (`ondelete` safeguards: `RESTRICT` on `ledger_entries` protects referenced parent accounts/transactions from deletion, `SET NULL` on audit/transaction initiators, `CASCADE` on memberships/sessions/idempotency), 9 check constraints, 2 composite unique constraints, 18 indexes, and `alembic_version`.
+- **Schema Drift Check:** Verified clean via `python -m alembic -c backend\alembic.ini check` (`No new upgrade operations detected`).
+- **Development Database Status:** The initial migration was applied to `ledgerline_test`. The development database (`ledgerline`) was not targeted by that migration, and its complete contents have not been independently verified.
+- **Implementation Status:** Application business logic (authentication, authorization, transfer processing, and double-entry ledger posting) is scheduled for subsequent implementation phases.
+
+## Remaining Engineering Considerations
+
+The following capabilities are deliberately distinguished from the initial database foundation and represent upcoming implementation work:
+- Atomic double-entry ledger posting and debit/credit balancing in service layer (`ledger_service.py`).
+- Database-enforced immutability for posted ledger entries (currently, `ON DELETE RESTRICT` protects parent records from deletion, but does not prevent direct `UPDATE` or `DELETE` on ledger entries; database-enforced append-only behavior via role permissions or triggers remains a future requirement).
+- Server-side database triggers for automatic `updated_at` refresh on raw SQL updates.
+- Engine-level PostgreSQL row-level security (RLS), if required by the threat model.
+
 ## Running Tests
+
+Configured via `pytest.ini` with 48 automated unit tests verifying models, check constraints, relationship back-populations, and database isolation safety:
 
 ```powershell
 pytest -q
 ```
+*Current test result:* **48 passed in 2.58s** (0 warnings).
+
+## Documentation & AI Usage Log
+
+- **Architecture Details:** See [`docs/architecture.md`](docs/architecture.md) for domain service design and invariant specifications.
+- **AI Usage Log:** See [`PROMPTS.md`](PROMPTS.md) for the complete, verbatim prompt history and independent audit trail.
 
 ## API Documentation
 

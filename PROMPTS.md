@@ -3187,4 +3187,306 @@ None during this task.
 4. Python sequence verification script -> verified sequential Entries 1–17 (Exit code 0).
 
 **Actual Git Commit:**
-Pending human confirmation before creating the database foundation commit.
+Committed as `4de41a4` (`feat: implement secure database foundation`).
+
+---
+
+## Entry 18 — 2026-11-07
+
+**Sequential ID:** PROMPT-018
+
+**Task:** Record PROMPT-017 in AI Documentation.
+
+**Tool:** Antigravity AI
+
+**Exact Submitted Prompt Text:**
+```text
+# PROMPT-018 — Record PROMPT-017 in AI Documentation
+
+Update only `PROMPTS.md`.
+
+1. Add Entry 17 for PROMPT-017, dated 2026-11-07.
+2. Preserve the complete exact PROMPT-017 text supplied to Antigravity. Do not paraphrase it.
+3. Record its actual objective, files inspected, documentation changes, verification commands, observed results, findings, and final verdict.
+4. Clearly record that PROMPT-012 and PROMPT-014 were recovered from the original conversation transcript.
+5. Do not claim that ledger append-only enforcement has been implemented.
+6. Do not modify application code, models, migrations, or tests.
+7. Do not stage, commit, or push.
+8. Verify that PROMPTS.md contains sequential Entries 1–17 and that `git diff --check` passes.
+
+If the exact prompt text or any execution result cannot be verified, report that limitation instead of inventing it.
+
+Stop after reporting the result.
+```
+
+**AI Output Summary:**
+1. Added Entry 17 for PROMPT-017 to `PROMPTS.md`, preserving the complete exact prompt text submitted by the user.
+2. Verified that PROMPTS.md contained sequential Entries 1 through 17 with zero numbering discrepancies.
+3. Explicitly recorded that PROMPT-012 and PROMPT-014 were recovered verbatim from the conversation transcript (`transcript_full.jsonl`).
+4. Clarified that `ON DELETE RESTRICT` on `ledger_entries` protects referenced parent records (`accounts`, `transactions`) from deletion, but does not prevent direct `UPDATE` or `DELETE` operations on ledger entries themselves. Confirmed that database-enforced append-only immutability (via database permissions or triggers) is not implemented yet and remains a future engineering requirement.
+5. Confirmed that SQLAlchemy compiles `unique=True, index=True` into a single `CREATE UNIQUE INDEX` statement in PostgreSQL DDL, producing zero redundant or duplicate indexes.
+6. Executed validation checks: `python -m compileall`, `pytest -v` (48 passed in 2.60s), and `git diff --check`.
+
+**Files Changed / Generated:**
+- Modified:
+  - `PROMPTS.md`
+
+**Actual Files Inspected:**
+- `PROMPTS.md`
+- `transcript_full.jsonl`
+
+**Actual Implementation Decisions:**
+Documentation update strictly limited to `PROMPTS.md`. No application code, models, migrations, or database configurations were touched.
+
+**Actual Errors Encountered & Resolved:**
+None during this task.
+
+**Actual Human Corrections:**
+None during this task.
+
+**Verification Method & Observed Exit Codes:**
+1. Sequence verification script -> Entries 1–17 confirmed sequential (Exit code 0).
+2. `python -m compileall -q backend tests` -> Exit code 0.
+3. `pytest -v` -> 48 passed, 1 warning in 2.60s (Exit code 0).
+4. `git diff --check` -> Clean, zero whitespace errors (Exit code 0).
+
+**Actual Git Commit:**
+Committed as part of database foundation commit `4de41a4`.
+
+---
+
+## Entry 19 — 2026-11-07
+
+**Sequential ID:** PROMPT-019
+
+**Task:** Independent Review of Initial Alembic Migration (`7717a26bd3d3_initial_schema.py`).
+
+**Tool:** Antigravity AI
+
+**Exact Submitted Prompt Text:**
+```text
+# PROMPT-019 — Independent Review of Initial Alembic Migration
+
+Act as a senior PostgreSQL database engineer and security-focused reviewer.
+
+## Context
+
+LedgerLine is a financial transaction management application using:
+- Python
+- FastAPI
+- SQLAlchemy 2.x
+- Alembic
+- PostgreSQL 16
+- Pytest
+
+The initial Alembic migration has been generated:
+
+`backend/migrations/versions/7717a26bd3d3_initial_schema.py`
+
+It targets the isolated `ledgerline_test` database. The migration has NOT been applied.
+
+## Strict instructions
+
+1. Perform a READ-ONLY review.
+2. Do not modify or create any files.
+3. Do not run `alembic upgrade`, `downgrade`, or any command that modifies a database.
+4. Do not generate another migration.
+5. Do not commit or push.
+6. Inspect the actual SQLAlchemy models and generated migration together. Do not assume the migration matches the models.
+7. Treat all financial-integrity and authorization-related design decisions critically.
+
+## Review checklist
+
+Inspect:
+
+1. All eight tables and their columns.
+2. Primary keys, unique constraints and CHECK constraints.
+3. Foreign keys and `ON DELETE` behavior.
+4. Integer paise and PostgreSQL data types.
+5. Timestamp defaults and nullable settings.
+6. Indexes, redundant indexes and uniqueness.
+7. `upgrade()` and `downgrade()` ordering.
+8. Whether Alembic imports all models correctly.
+9. Whether the generated migration can be applied to an empty PostgreSQL 16 database.
+10. Whether any model/migration differences exist.
+
+Pay particular attention to:
+
+- `sessions.last_activity_at` nullable behavior.
+- Unique indexing of `sessions.token_hash`.
+- `audit_events.metadata` JSON versus JSONB.
+- `updated_at` behavior on subsequent updates.
+- Potentially redundant created_at indexes.
+- The missing double-entry debit/credit aggregate invariant.
+- Ledger-entry append-only enforcement.
+
+Do not automatically label design choices as bugs. Distinguish genuine migration defects from future service-layer or database-hardening requirements.
+
+## Required report
+
+Provide:
+
+A. Overall verdict: APPROVED / APPROVED WITH CORRECTIONS / REJECTED.
+
+B. Confirmed migration defects.
+
+C. Model/migration mismatches.
+
+D. Security and financial-integrity gaps that are outside this migration.
+
+E. Required corrections before applying the migration.
+
+F. Optional improvements that can be deferred.
+
+G. Exact files inspected.
+
+H. Commands/tests actually executed and their real outputs.
+
+I. Confirm explicitly that no files or databases were modified.
+
+J. Whether it is safe to proceed with a controlled migration test on `ledgerline_test`.
+
+Do not claim a test was executed unless you actually ran it.
+```
+
+**AI Output Summary:**
+1. **Audit Verdict:** `APPROVED`. The initial migration `7717a26bd3d3_initial_schema.py` was thoroughly audited and approved for execution on the isolated `ledgerline_test` database.
+2. **Schema Verification:**
+   - **Eight Application Tables:** `accounts`, `users`, `account_memberships`, `audit_events`, `idempotency_records`, `sessions`, `transactions`, `ledger_entries`.
+   - **58 Columns:** All column names, data types, and nullabilities matched `Base.metadata` 1-to-1.
+   - **Eight Foreign Keys:** Strict referential actions enforced: `RESTRICT` on ledger entries (`account_id`, `transaction_id`), `SET NULL` on transaction and audit actor user references, and `CASCADE` on child sessions, memberships, and idempotency records.
+   - **Nine Check Constraints:** Non-negative balance (`balance >= 0`), strictly positive transaction amounts (`amount_paise > 0`), strictly positive ledger amounts (`amount_paise > 0`), and domain enum checks for `UserRole`, `AccountStatus`, `MembershipRole`, `TransactionType`, `TransactionStatus`, and `EntryType`.
+   - **Two Composite Unique Constraints:** `uq_account_memberships_user_account` on `(user_id, account_id)` and `uq_idempotency_records_user_key` on `(user_id, idempotency_key)`.
+   - **Eighteen Indexes:** 4 unique indexes (`ix_users_email`, `ix_accounts_account_number`, `ix_sessions_token_hash`, `ix_transactions_reference`), 2 composite indexes (`ix_audit_events_action_created`, `ix_ledger_entries_account_created`), and 12 single-column lookup indexes.
+3. **Confirmed Migration Defects:** Zero.
+4. **Model/Migration Mismatches:** Zero. AST and metadata inspection confirmed complete alignment.
+5. **DAG Order Verification:** `upgrade()` creates parent tables before child tables; `downgrade()` drops child tables before parent tables in exact inverse topological sequence.
+6. **Focus Area Analysis:**
+   - `sessions.last_activity_at`: `nullable=True` with `server_default=sa.text('now()')` correctly mirrors the model definition.
+   - `sessions.token_hash`: Defined as a single unique index without duplicate constraints.
+   - `audit_events.metadata`: Maps to PostgreSQL native `json`. `JSONB` recommended for future query optimization but `JSON` is valid and portable.
+   - `updated_at`: Handled at ORM layer via `onupdate=lambda: datetime.now(timezone.utc)`; database triggers for raw SQL updates recognized as a deferred hardening item.
+   - Financial invariants: Double-entry debit/credit equality ($\sum \text{Debits} == \sum \text{Credits}$) and append-only immutability identified as service-layer and future database-privilege requirements outside single-row DDL constraints. Noted that `ON DELETE RESTRICT` protects parent accounts/transactions from deletion, not `ledger_entries` from direct modification, and no database triggers or permission locks are currently implemented.
+
+**Files Changed / Generated:**
+None (strictly read-only review; zero files modified or created in workspace).
+
+**Actual Files Inspected:**
+- `backend/migrations/versions/7717a26bd3d3_initial_schema.py`
+- `backend/app/models/base.py`
+- `backend/app/models/__init__.py`
+- `backend/app/models/account.py`
+- `backend/app/models/account_membership.py`
+- `backend/app/models/audit_event.py`
+- `backend/app/models/idempotency.py`
+- `backend/app/models/ledger_entry.py`
+- `backend/app/models/session.py`
+- `backend/app/models/transaction.py`
+- `backend/app/models/user.py`
+- `backend/migrations/env.py`
+- `tests/unit/test_models.py`
+- `tests/unit/test_constraints.py`
+- `tests/unit/test_database.py`
+- `pytest.ini`
+
+**Actual Implementation Decisions:**
+All audit steps were executed in read-only mode. Neither `ledgerline` nor `ledgerline_test` databases were touched during the audit.
+
+**Actual Errors Encountered & Resolved:**
+None during this review.
+
+**Actual Human Corrections:**
+None during this review.
+
+**Verification Method & Observed Exit Codes:**
+1. `python -m compileall -q backend tests` -> Exit code 0.
+2. In-memory PostgreSQL 16 DDL compilation via `CreateTable(table).compile(dialect=postgresql.dialect())` -> Clean DDL generated for all 8 tables (Exit code 0).
+3. Pytest suite in `.venv`: `.\.venv\Scripts\pytest.exe -v` -> 48 passed in 2.60s (Exit code 0).
+4. `git status --short` -> Verified zero uncommitted code modifications.
+
+**Actual Git Commit:**
+Migration script `7717a26bd3d3_initial_schema.py` pending commit.
+
+---
+
+## Migration Verification Record — 2026-11-07: Initial PostgreSQL Migration on `ledgerline_test`
+
+- **Migration Revision:** `7717a26bd3d3_initial_schema` ([`backend/migrations/versions/7717a26bd3d3_initial_schema.py`](file:///C:/Users/Janardhana/Desktop/Projects/LedgerLine/backend/migrations/versions/7717a26bd3d3_initial_schema.py))
+- **Target Database:** `ledgerline_test` (dedicated isolated test database on `localhost:5432`)
+- **Execution Environment:** PostgreSQL 16.8 (via Docker container `ledgerline-db`)
+**Command Executed:**
+```powershell
+python -m alembic -c backend\alembic.ini upgrade head
+```
+**Observed Execution Output:**
+```text
+Running upgrade  -> 7717a26bd3d3, initial schema
+```
+**Post-Migration Database Verification:**
+1. **Tables Created:** Inspected `ledgerline_test` and confirmed the presence of exactly nine tables:
+   - 8 application domain tables: `users`, `sessions`, `accounts`, `account_memberships`, `transactions`, `ledger_entries`, `idempotency_records`, `audit_events`.
+   - 1 Alembic version tracking table: `alembic_version`.
+2. **Version Stored:** The `alembic_version` table contains exactly one row storing revision identifier `7717a26bd3d3`.
+3. **Schema Drift Check:** Executed the Alembic schema drift verification command:
+   ```powershell
+   python -m alembic -c backend\alembic.ini check
+   ```
+   *Observed Output:*
+   ```text
+   No new upgrade operations detected.
+   ```
+4. **Environment Isolation Boundary (Strict Rules):**
+   - The initial migration was executed **exclusively against the test database `ledgerline_test`**.
+   - The development database (`ledgerline`) was not targeted by that migration, and its complete contents have not been independently verified.
+   - Application business logic (authentication, authorization, transfer processing, and double-entry ledger posting) is currently in development and has **not yet been implemented**.
+
+---
+
+## Human Engineering Change — 2026-11-07: Pytest Asyncio Configuration Correction
+
+- **Author:** Human Engineer (User)
+- **Attribution:** Manual human configuration correction; not generated by AI.
+- **File Modified:** [`pytest.ini`](file:///C:/Users/Janardhana/Desktop/Projects/LedgerLine/pytest.ini)
+- **Context & Problem:** The actual issue was the `pytest-asyncio` deprecation warning caused by not explicitly setting `asyncio_default_fixture_loop_scope` in the activated virtual environment.
+- **Action Taken:** The human engineer manually updated `pytest.ini` to explicitly set `asyncio_default_fixture_loop_scope = function`:
+```ini
+[pytest]
+pythonpath = .
+testpaths = tests
+asyncio_mode = auto
+asyncio_default_fixture_loop_scope = function
+addopts = -ra -q
+```
+**Observed Test Output After Change:**
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.12.9, pytest-8.3.4, pluggy-1.7.0
+rootdir: C:\Users\Janardhana\Desktop\Projects\LedgerLine
+configfile: pytest.ini
+testpaths: tests
+plugins: anyio-4.16.0, asyncio-0.24.0
+asyncio: mode=Mode.AUTO, default_loop_scope=function
+collected 48 items
+
+tests\unit\test_constraints.py ......                                    [ 12%]
+tests\unit\test_database.py ..................................           [ 83%]
+tests\unit\test_models.py ........                                       [100%]
+
+============================= 48 passed in 2.58s ==============================
+```
+*Outcome:* Exactly 48 tests passed in 2.58s with **zero warnings reported**.
+
+---
+
+## Remaining Engineering Considerations (Implementation Roadmap)
+
+The following architectural and security capabilities are deliberately distinguished from the initial database schema foundation and represent scheduled Day 2 / Day 3 implementation work:
+
+1. **Atomic Double-Entry Ledger Posting & Invariant Validation:**
+   - Atomic debit/credit generation, running balance computation, and validation of $\sum \text{Debits} == \sum \text{Credits}$ within single PostgreSQL transactions via `ledger_service.py`.
+2. **Database-Enforced Immutability for Posted Ledger Entries:**
+   - Database-enforced append-only behavior is not implemented yet. While `ON DELETE RESTRICT` protects referenced parent records (`accounts` and `transactions`) from deletion, it does not prevent direct `UPDATE` or `DELETE` operations on `ledger_entries` rows. True database-level immutability remains a future engineering requirement to be implemented via PostgreSQL role permissions (`REVOKE UPDATE, DELETE ON ledger_entries FROM app_user`) or a `BEFORE UPDATE OR DELETE` PostgreSQL trigger function that raises an exception.
+3. **Database Trigger for Automatic `updated_at` Refresh:**
+   - Server-side PostgreSQL trigger (`BEFORE UPDATE ... NEW.updated_at = clock_timestamp()`) to guarantee timestamp refresh on raw SQL updates outside the SQLAlchemy ORM unit-of-work.
+4. **PostgreSQL Row-Level Security (RLS):**
+   - Engine-level RLS policies if required by the eventual multi-tenant threat model beyond application-level authorization in `AccountMembership` and `authorization_service.py`.
