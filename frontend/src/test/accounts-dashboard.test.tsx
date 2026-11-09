@@ -39,7 +39,7 @@ const mockAccounts: AccountWithMembership[] = [
     status: 'ACTIVE',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
-    membership_role: 'SIGNER',
+    membership_role: 'OPERATOR',
   },
 ]
 
@@ -82,7 +82,7 @@ describe('Dashboard & Account Listing', () => {
     // Total balance: ₹2,500.00 + ₹5,000.00 = ₹7,500.00
     expect(screen.getByText(/7,500.00/)).toBeInTheDocument()
     expect(screen.getByText('OWNER')).toBeInTheDocument()
-    expect(screen.getByText('SIGNER')).toBeInTheDocument()
+    expect(screen.getByText('OPERATOR')).toBeInTheDocument()
   })
 
   it('renders clean empty state when no accounts exist', async () => {

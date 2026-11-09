@@ -14,6 +14,8 @@ export function LoginPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname || '/'
+  const isDemoCredentialsEnabled =
+    import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEMO_CREDENTIALS === 'true'
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -96,32 +98,34 @@ export function LoginPage() {
           </button>
         </form>
 
-        <div className="quick-access-section">
-          <p className="quick-access-title">Assessment Demo Credentials</p>
-          <div className="quick-access-buttons">
-            <button
-              type="button"
-              className="btn btn-outline btn-xs"
-              onClick={() => fillQuickCredentials('admin@ledgerline.com')}
-            >
-              Admin
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-xs"
-              onClick={() => fillQuickCredentials('holder@ledgerline.com')}
-            >
-              Account Holder
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-xs"
-              onClick={() => fillQuickCredentials('auditor@ledgerline.com')}
-            >
-              Auditor
-            </button>
+        {isDemoCredentialsEnabled && (
+          <div className="quick-access-section">
+            <p className="quick-access-title">Assessment Demo Credentials</p>
+            <div className="quick-access-buttons">
+              <button
+                type="button"
+                className="btn btn-outline btn-xs"
+                onClick={() => fillQuickCredentials('admin@ledgerline.com')}
+              >
+                Admin
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-xs"
+                onClick={() => fillQuickCredentials('holder@ledgerline.com')}
+              >
+                Account Holder
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-xs"
+                onClick={() => fillQuickCredentials('auditor@ledgerline.com')}
+              >
+                Auditor
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="auth-footer">
           <p>

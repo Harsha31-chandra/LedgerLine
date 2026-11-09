@@ -13,6 +13,12 @@ export async function listAccounts(): Promise<AccountWithMembership[]> {
   })
 }
 
+export async function getAdminAccounts(): Promise<Account[]> {
+  return apiClient<Account[]>('/admin/accounts', {
+    method: 'GET',
+  })
+}
+
 export async function getAccount(accountId: string): Promise<AccountWithMembership> {
   return apiClient<AccountWithMembership>(`/accounts/${accountId}`, {
     method: 'GET',

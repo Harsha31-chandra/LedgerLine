@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { AdminAccountsPage } from '../pages/AdminAccountsPage'
 import { AuthContext } from '../context/authContextDef'
 import * as accountsApi from '../api/accounts'
-import type { User, AccountWithMembership } from '../types/api'
+import type { User, Account } from '../types/api'
 
 vi.mock('../api/accounts')
 
@@ -28,7 +28,7 @@ const holderUser: User = {
   updated_at: '2026-01-01T00:00:00Z',
 }
 
-const mockAccounts: AccountWithMembership[] = [
+const mockAccounts: Account[] = [
   {
     id: 'acc-1',
     account_number: 'LL-2026-0001',
@@ -38,14 +38,13 @@ const mockAccounts: AccountWithMembership[] = [
     status: 'ACTIVE',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
-    membership_role: 'OWNER',
   },
 ]
 
 describe('Admin Accounts Console', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.mocked(accountsApi.listAccounts).mockResolvedValue(mockAccounts)
+    vi.mocked(accountsApi.getAdminAccounts).mockResolvedValue(mockAccounts)
   })
 
   afterEach(() => {
@@ -73,7 +72,7 @@ describe('Admin Accounts Console', () => {
     expect(
       screen.getByText(/Administrator privileges are required to view this console/i),
     ).toBeInTheDocument()
-    expect(accountsApi.listAccounts).not.toHaveBeenCalled()
+    expect(accountsApi.getAdminAccounts).not.toHaveBeenCalled()
   })
 
   it('allows admin users to view accounts and create a new account', async () => {
@@ -110,6 +109,10 @@ describe('Admin Accounts Console', () => {
       expect(screen.getByText('Administrative Account Console')).toBeInTheDocument()
       expect(screen.getByText('Main Customer Account')).toBeInTheDocument()
     })
+
+    // Verify member-only View link is NOT rendered, but administrative Status button IS rendered
+    expect(screen.queryByRole('link', { name: /^View$/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Status$/i })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /\+ Create New Account/i }))
 

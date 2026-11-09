@@ -1,23 +1,23 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { createAccount, listAccounts, updateAccountStatus } from '../api/accounts'
+import { createAccount, getAdminAccounts, updateAccountStatus } from '../api/accounts'
 import { Alert } from '../components/Alert'
 import { CurrencyAmount } from '../components/CurrencyAmount'
 import { Modal } from '../components/Modal'
 import { StatusBadge } from '../components/StatusBadge'
 import { useAuth } from '../hooks/useAuth'
-import type { AccountStatus, AccountWithMembership } from '../types/api'
+import type { Account, AccountStatus } from '../types/api'
 
 export function AdminAccountsPage() {
   const { user } = useAuth()
-  const [accounts, setAccounts] = useState<AccountWithMembership[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
   const [isLoading, setIsLoading] = useState(user?.role === 'ADMIN')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   // Modals
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
-  const [selectedAccountForStatus, setSelectedAccountForStatus] = useState<AccountWithMembership | null>(null)
+  const [selectedAccountForStatus, setSelectedAccountForStatus] = useState<Account | null>(null)
 
   // Create Form State
   const [accountName, setAccountName] = useState('')
@@ -33,7 +33,7 @@ export function AdminAccountsPage() {
     setIsLoading(true)
     setErrorMessage(null)
     try {
-      const data = await listAccounts()
+      const data = await getAdminAccounts()
       setAccounts(data)
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to retrieve accounts.')
@@ -47,7 +47,7 @@ export function AdminAccountsPage() {
       return
     }
     let isMounted = true
-    listAccounts()
+    getAdminAccounts()
       .then((data) => {
         if (isMounted) {
           setAccounts(data)
@@ -219,25 +219,17 @@ export function AdminAccountsPage() {
                       {acc.id}
                     </td>
                     <td className="text-right">
-                      <div className="button-group-inline">
-                        <Link
-                          to={`/accounts/${acc.id}`}
-                          className="btn btn-outline btn-xs"
-                        >
-                          View
-                        </Link>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-xs"
-                          onClick={() => {
-                            setSelectedAccountForStatus(acc)
-                            setStatusVal(acc.status)
-                            setFormError(null)
-                          }}
-                        >
-                          Status
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-xs"
+                        onClick={() => {
+                          setSelectedAccountForStatus(acc)
+                          setStatusVal(acc.status)
+                          setFormError(null)
+                        }}
+                      >
+                        Status
+                      </button>
                     </td>
                   </tr>
                 ))}

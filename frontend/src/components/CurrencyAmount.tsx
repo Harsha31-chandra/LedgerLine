@@ -25,9 +25,10 @@ export function CurrencyAmount({
       signPrefix = '+'
       signClass = 'amount-positive'
     } else if (isNegative) {
-      signPrefix = '-'
       signClass = 'amount-negative'
     }
+  } else if (isNegative) {
+    signClass = 'amount-negative'
   }
 
   return (

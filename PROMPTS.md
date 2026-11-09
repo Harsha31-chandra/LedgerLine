@@ -3478,6 +3478,564 @@ tests\unit\test_models.py ........                                       [100%]
 
 ---
 
+# PROMPT-040 — Fix Frontend Currency Precision and Verify Money Handling
+
+
+
+Act as a senior TypeScript and financial-application engineer working on the existing LedgerLine project.
+
+
+
+Project directory:
+
+`C:\Users\Janardhana\Desktop\Projects\LedgerLine`
+
+
+
+## Context
+
+The current `parseRupeesToPaise()` implementation uses BigInt internally but eventually returns `Number(paise)`. JavaScript numbers cannot represent every integer above `Number.MAX_SAFE_INTEGER`. This creates a financial-integrity risk: large paise values may silently lose precision.
+
+
+
+## Objectives
+
+
+
+1. Inspect the complete frontend currency utility and every call site that consumes its output.
+
+2. Inspect API request types and backend amount validation to understand the existing contract.
+
+3. Implement the smallest safe correction without introducing unnecessary architectural changes.
+
+
+
+## Required behaviour
+
+
+
+- Never silently round or truncate a monetary amount.
+
+- Reject values that cannot be represented exactly by the existing frontend number-based contract.
+
+- If retaining the number-based contract, enforce `Number.MAX_SAFE_INTEGER` as the frontend paise limit and return the existing invalid-input result for larger values.
+
+- Preserve valid Indian comma grouping, decimal precision rules, negative formatting, and existing API compatibility.
+
+- Do not change the backend BigInteger limit merely to accommodate the frontend.
+
+- Ensure formatting does not silently lose precision for values accepted by the frontend.
+
+- Clearly document the frontend safe-integer limit and its distinction from the backend database limit.
+
+
+
+## Tests
+
+
+
+Add or update tests for:
+
+- `Number.MAX_SAFE_INTEGER` boundary.
+
+- One paise above the safe-integer boundary.
+
+- Large Indian-formatted rupee amounts.
+
+- Valid ordinary amounts.
+
+- Invalid grouping and excess decimal precision.
+
+- Negative amount formatting.
+
+- Existing currency component behaviour.
+
+
+
+Run:
+
+1. Frontend test suite.
+
+2. Oxlint.
+
+3. TypeScript checks.
+
+4. Production build.
+
+5. Backend test suite to confirm no regression.
+
+
+
+## Documentation and AI-use history
+
+
+
+- Update relevant documentation only where necessary.
+
+- Add the complete, exact text of this prompt to `PROMPTS.md` as the next chronological entry.
+
+- Preserve all previous prompt history.
+
+
+
+## Strict constraints
+
+
+
+- Do not modify backend financial logic or database migrations.
+
+- Do not modify account authorization or authentication.
+
+- Do not add unrelated features or dependencies.
+
+- Do not access or modify the development database.
+
+- Do not stage, commit, or push Git changes.
+
+- Do not overwrite unrelated user work.
+
+
+
+## Final report
+
+
+
+Provide:
+
+1. Root cause and chosen correction.
+
+2. Exact files changed.
+
+3. Currency precision behaviour before and after.
+
+4. Tests and actual results, including failures.
+
+5. Confirmation that backend files and migrations were untouched.
+
+6. Confirmation that no Git operations were performed.
+
+7. Remaining known limitations.
+
+
+
+Stop after completing this task. Do not start another task automatically.
+
+---
+
+# PROMPT-042 — Implement Admin Registry, Safe Demo Provisioning and Fresh-Install Readiness
+
+Act as a senior full-stack engineer and security engineer working on the existing LedgerLine project.
+
+Project directory:
+`C:\Users\Janardhana\Desktop\Projects\LedgerLine`
+
+Use the PROMPT-041 audit report as the implementation basis.
+
+## Primary objective
+
+Make LedgerLine demonstrable from a fresh database installation by correcting Admin provisioning, administrative account visibility, demo login behaviour, and related documentation.
+
+This is an implementation of the existing assessment requirements. Do not invent unrelated product features.
+
+## Phase 1 — Safe Demo Provisioning
+
+Implement `backend/app/scripts/seed_demo.py`.
+
+Requirements:
+- Provision the three documented demo identities:
+  - `admin@ledgerline.com`
+  - `holder@ledgerline.com`
+  - `auditor@ledgerline.com`
+- Assign roles server-side using the existing UserRole definitions.
+- Use the existing Argon2id password hashing implementation.
+- Do not store plaintext passwords in the database.
+- Make the script idempotent: running it repeatedly must not create duplicate users, memberships or accounts.
+- Do not overwrite an existing user's password or role unexpectedly.
+- Initialize SYSTEM_CLEARING according to the existing financial-account implementation.
+- Provision two sample customer accounts using existing account and membership services.
+- Ensure sample accounts have valid ownership and correct ledger/balance consistency. Do not fabricate unbalanced ledger entries or money.
+- Use explicit configuration and a clear command-line entry point.
+- Never expose this seed functionality through a public HTTP endpoint.
+
+Demo credentials:
+- Inspect the existing README and LoginPage before deciding on one consistent demo password.
+- Use a documented local/evaluation-only credential.
+- Do not put production credentials or secrets in source code.
+- Clearly warn that demo credentials must be changed or disabled before real deployment.
+
+Database safety:
+- Do not connect to or modify the development database `ledgerline`.
+- Use only the existing explicitly approved test database `ledgerline_test` for automated tests.
+- Do not run the seed script against either database during implementation.
+- Explain the exact command and database configuration needed for a future fresh local installation.
+
+## Phase 2 — Administrative Account Registry
+
+Implement a separate administrative account listing.
+
+Backend:
+- Add `list_all_accounts()` to `backend/app/services/account_service.py`.
+- Add `GET /admin/accounts` protected by the existing `require_admin` dependency.
+- Return account registry information using existing response schemas.
+- Do not grant account membership or account operational privileges through this endpoint.
+- Do not expose private ledger statements or transaction details through this endpoint.
+- Exclude SYSTEM_CLEARING from ordinary customer account listings, or clearly identify and protect it as a system-only account.
+- Preserve existing `GET /accounts` membership-based behaviour.
+
+Authorization tests:
+- Admin can list all customer accounts.
+- Holder cannot access `/admin/accounts`.
+- Auditor cannot access `/admin/accounts`.
+- A listed account does not grant the Admin account-operation permission.
+- Existing member and non-member authorization tests remain valid.
+- System clearing is not exposed as an ordinary customer account.
+
+## Phase 3 — Frontend Corrections
+
+1. Add `getAdminAccounts()` in `frontend/src/api/accounts.ts`.
+2. Update `AdminAccountsPage.tsx` to use `/admin/accounts`.
+3. Remove the broken member-only View link for non-member accounts.
+4. Preserve authorized account-status controls.
+5. Do not add links to private account statements for non-members.
+6. Update quick-login buttons in `LoginPage.tsx`:
+   - Show only in development mode or when an explicit evaluation flag is enabled.
+   - Do not expose demo credentials in normal production UI.
+   - Ensure the selected demo user's email and password match the documented seed configuration.
+7. Preserve session cookies and existing CSRF behaviour.
+
+## Phase 4 — Documentation
+
+Update:
+- `README.md`
+- `docs/architecture.md`
+- `THREATS.md`, if relevant
+- `PROMPTS.md`
+
+Correct:
+- Demo account provisioning instructions.
+- Demo credential consistency.
+- Administrative account registry endpoint.
+- Difference between administrative registry visibility and account membership.
+- `SIGNER` references to `OPERATOR`.
+- Fresh-install setup and testing commands.
+- Production warning about demo credentials.
+
+Append the complete exact text of this PROMPT-042 to PROMPTS.md. Preserve all previous prompt history.
+
+## Phase 5 — Tests and Verification
+
+Add or update tests for:
+- Idempotent demo seeding using isolated test database sessions.
+- Correct roles and password hashing.
+- Existing users are not silently modified.
+- Admin registry endpoint access.
+- Holder and Auditor denial.
+- Account membership permissions remain unchanged.
+- System clearing exclusion or protection.
+- Admin page uses the correct API and does not render the broken View link.
+- Demo login visibility in development and production modes.
+
+Run:
+1. Focused backend tests.
+2. Full backend test suite, including PostgreSQL concurrency tests.
+3. Full frontend test suite.
+4. Oxlint.
+5. TypeScript checks.
+6. Production build.
+7. `git diff --check`.
+
+Report actual outputs, including failures.
+
+## Strict constraints
+
+- Do not weaken existing authentication, CSRF, RBAC, IDOR or financial-integrity controls.
+- Do not change financial transaction semantics.
+- Do not modify existing migrations unless demonstrably necessary and approved.
+- Do not access or modify the development database.
+- Do not run the demo seed script against any existing database.
+- Do not hardcode production secrets.
+- Do not stage, commit or push Git changes.
+- Preserve unrelated uncommitted work.
+- Do not implement features outside the assessment scope.
+
+## Final report
+
+Provide:
+1. Exact files changed.
+2. Demo provisioning behaviour.
+3. Administrative registry behaviour.
+4. Authorization test results.
+5. Frontend changes.
+6. Backend and frontend test results.
+7. Database safety confirmation.
+8. Git operation confirmation.
+9. Remaining limitations.
+10. Exact commands for the user to initialize and demonstrate a fresh local installation.
+
+Stop after this task. Do not start another prompt automatically.
+
+---
+
+# PROMPT-045 — LedgerLine Controlled Release Preparation and Git Baseline
+
+## Role
+Act as a senior software release engineer responsible for safely preparing the LedgerLine repository for its next development phase.
+
+## Project
+Local repository:
+`C:\Users\Janardhana\Desktop\Projects\LedgerLine`
+
+GitHub:
+`https://github.com/Harsha31-chandra/LedgerLine.git`
+
+Branch: `master`
+
+## Context
+LedgerLine has completed substantial implementation work through PROMPT-042.
+
+The PROMPT-044 release review reported:
+- 41 modified tracked files.
+- 19 untracked files across 15 status entries.
+- 60 total intended files.
+- Backend tests: 258 passed.
+- Frontend tests: 59 passed.
+- Lint: zero warnings or errors.
+- Frontend production build: passed.
+- `git diff --check`: clean.
+
+The proposed commit message is:
+
+`feat: complete financial core, security audit remediations, admin registry and demo readiness`
+
+## Objective
+Prepare a reliable Git baseline before starting PostgreSQL-level security and integrity enhancements.
+
+## Mandatory tasks
+
+### 1. Inspect repository state
+- Verify the repository path and current branch.
+- Run `git status --short`.
+- Verify the current HEAD and upstream tracking branch.
+- Identify all modified, deleted, renamed and untracked files.
+- Reconcile the actual file count with the PROMPT-044 report.
+- Identify any files that are generated, sensitive, temporary or unrelated.
+- Never assume the old inventory is still current.
+
+### 2. Inspect changes
+- Review the tracked changes using `git diff`.
+- Inspect untracked files individually.
+- Confirm that every intended change belongs to LedgerLine.
+- Check for accidental credentials, API keys, private database URLs, local configuration, generated artifacts and personal information.
+- Confirm `.env` remains ignored.
+- Confirm `.env.example` contains placeholders only.
+- Do not expose secret values in the report.
+
+### 3. Validate the application
+Run the existing project-approved validation commands.
+
+Verify:
+- Backend tests.
+- Frontend tests.
+- Backend lint and formatting checks.
+- Frontend lint.
+- TypeScript checks.
+- Production build.
+- Migration consistency checks where safe.
+- `git diff --check`.
+
+Do not modify code merely to make tests pass without identifying and explaining the cause.
+
+### 4. Review staging inventory
+Produce an exact path-by-path list of files proposed for staging.
+
+For each file, state:
+- Whether it is modified or untracked.
+- Its purpose.
+- Why it belongs in this release.
+
+Investigate any unexpected file or discrepancy.
+
+### 5. Prepare the release
+Prepare the proposed commit message and release summary.
+
+Do not perform any Git write operation yet.
+
+## Strict safety requirements
+- Do not execute `git add`, `git commit`, `git push`, `git reset`, `git clean`, `git stash` or force-push.
+- Do not discard or overwrite any work.
+- Do not modify application source code.
+- Do not modify database schemas or execute migrations.
+- Do not connect to development or production databases.
+- Do not change branches.
+- Do not stage files automatically.
+
+## PROMPTS.md documentation
+Record the exact complete text of this PROMPT-045 in `PROMPTS.md`, following the existing prompt documentation convention, only if the repository is otherwise safe to modify. Preserve all existing entries.
+
+If documentation modification itself would interfere with the release inventory, explain that and do not silently change the inventory.
+
+## Final report
+Provide:
+1. Repository and branch status.
+2. Exact modified and untracked file counts.
+3. Any discrepancies with PROMPT-044.
+4. Security and sensitive-file inspection results.
+5. Validation results.
+6. Exact proposed staging inventory.
+7. Proposed commit message.
+8. Any blockers or risks.
+9. Explicit confirmation that no Git write operations or database operations were performed.
+
+Stop and wait for approval before staging, committing or pushing anything.
+
+---
+
+# PROMPT-046 — Controlled Git Release: Stage, Commit and Push LedgerLine
+
+## Role
+Act as a senior release engineer. Execute a controlled Git release of the verified LedgerLine implementation.
+
+## Repository
+`C:\Users\Janardhana\Desktop\Projects\LedgerLine`
+
+Remote:
+`https://github.com/Harsha31-chandra/LedgerLine.git`
+
+Target branch: `master`
+Target remote branch: `origin/master`
+
+## Explicit authorization
+The project owner has explicitly approved:
+1. Staging the 60 reviewed LedgerLine files.
+2. Creating a Git commit.
+3. Pushing the commit to `origin/master`.
+
+This authorization applies only to the reviewed LedgerLine release.
+
+## Step 1 — Fresh pre-release verification
+
+Before modifying Git state:
+
+- Verify the repository path.
+- Verify the active branch is `master`.
+- Verify the remote is `origin`.
+- Verify upstream tracking.
+- Run `git status --short`.
+- Reconcile the actual file inventory with the PROMPT-045 report.
+- Confirm all intended changes are LedgerLine-related.
+- Check for unexpected files, secrets, credentials, `.env`, generated artifacts and unrelated changes.
+- Verify that the remote branch has not advanced unexpectedly.
+
+Expected baseline:
+- 41 modified tracked files.
+- 19 untracked files.
+- 60 intended release files.
+- Existing HEAD: `2c77db9`.
+
+If the repository state differs materially, STOP and report the discrepancy. Do not force the expected counts.
+
+## Step 2 — Validate
+
+Run the existing project validation commands:
+
+- Backend test suite.
+- Frontend test suite.
+- Frontend lint.
+- Frontend production build.
+- Python compilation.
+- `git diff --check`.
+
+Expected baseline:
+- 258 backend tests passing.
+- 59 frontend tests passing.
+- Zero frontend lint warnings or errors.
+- Successful production build.
+
+If a critical validation fails, STOP and report it. Do not hide or bypass failures.
+
+## Step 3 — Stage the reviewed files
+
+- Stage only the exact verified release inventory.
+- Do not use `git add .` or `git add -A`.
+- Do not stage unrelated or newly appeared files.
+- Inspect `git diff --cached --stat`.
+- Inspect `git diff --cached --check`.
+- Review the staged file list and confirm it contains only approved files.
+
+If the staged inventory differs from the approved inventory, STOP.
+
+## Step 4 — Commit
+
+Use this exact commit message:
+
+feat: complete financial core, security audit remediations, admin registry and demo readiness
+
+Commit body:
+
+Consolidate and publish the verified implementation covering PROMPT-038 through PROMPT-042.
+
+- Financial and ledger core with integer paise accounting and balanced double-entry posting.
+- Transaction locking, idempotency and reconciliation safeguards.
+- Argon2id authentication and session security.
+- CSRF protection, rate limiting and role-based access controls.
+- Anti-IDOR account and transaction authorization.
+- Administrative account registry and safe demo provisioning.
+- Frontend financial workflows, INR currency formatting and validation.
+- Automated backend and frontend test coverage.
+
+Do not amend an existing commit.
+
+## Step 5 — Push
+
+- Verify the commit was created on `master`.
+- Verify the intended remote is `origin`.
+- Verify the remote branch has not advanced unexpectedly.
+- Push normally to `origin master`.
+- Never force-push.
+- If authentication fails or a non-fast-forward rejection occurs, STOP and report the exact issue. Do not rewrite history or overwrite remote changes.
+
+## Step 6 — Verify release
+
+After pushing:
+
+- Verify local HEAD.
+- Verify `origin/master` points to the new commit.
+- Verify the working tree is clean.
+- Record the commit hash.
+- Record the push result.
+
+## Safety restrictions
+
+- Do not modify application source code.
+- Do not modify database schemas or run migrations.
+- Do not connect to development or production databases.
+- Do not seed demo data.
+- Do not delete, reset, stash or overwrite work.
+- Do not change branches.
+- Do not force-push.
+
+## PROMPTS.md
+
+Preserve the existing PROMPT-001 through PROMPT-045 history. Do not rewrite previous prompt records.
+
+If this execution prompt needs documenting, append its exact complete text using the existing convention. Do not silently include an additional file in the approved release inventory.
+
+## Final execution report
+
+Provide:
+1. Pre-release repository status.
+2. Actual file inventory and reconciliation.
+3. Validation results.
+4. Exact staged file count.
+5. Commit hash and full commit message.
+6. Push confirmation and target branch.
+7. Final working-tree status.
+8. Any warnings or issues.
+
+Do not claim a commit or push succeeded unless the corresponding Git command and verification confirm it.
+
+---
+
 ## Remaining Engineering Considerations (Implementation Roadmap)
 
 The following architectural and security capabilities are deliberately distinguished from the initial database schema foundation and represent scheduled Day 2 / Day 3 implementation work:

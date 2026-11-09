@@ -25,8 +25,8 @@ export function RoleBadge({ role, type = 'user' }: RoleBadgeProps) {
       case 'OWNER':
         badgeClass = 'badge-owner'
         break
-      case 'SIGNER':
-        badgeClass = 'badge-signer'
+      case 'OPERATOR':
+        badgeClass = 'badge-operator'
         break
       case 'VIEWER':
         badgeClass = 'badge-viewer'

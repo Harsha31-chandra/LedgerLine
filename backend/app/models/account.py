@@ -31,7 +31,7 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         CheckConstraint(
-            "balance >= 0",
+            "balance >= 0 OR account_number = 'SYSTEM_CLEARING'",
             name="ck_accounts_balance_non_negative",
         ),
         CheckConstraint(

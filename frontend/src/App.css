@@ -161,6 +161,7 @@
   border: 1px solid #c7d2fe;
 }
 
+.badge-operator,
 .badge-signer {
   background-color: #ccfbf1;
   color: #0f766e;

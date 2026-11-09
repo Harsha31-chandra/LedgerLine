@@ -163,4 +163,31 @@ describe('Authentication & Session Management', () => {
     expect(await screen.findByText('Passwords do not match.')).toBeInTheDocument()
     expect(authApi.registerUser).not.toHaveBeenCalled()
   })
+
+  it('hides quick demo credentials when not in development and flag is false', async () => {
+    const originalDev = import.meta.env.DEV
+    const originalFlag = import.meta.env.VITE_ENABLE_DEMO_CREDENTIALS
+    ;(import.meta.env as Record<string, unknown>).DEV = false
+    ;(import.meta.env as Record<string, unknown>).VITE_ENABLE_DEMO_CREDENTIALS = 'false'
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/login']}>
+          <AuthProvider>
+            <LoginPage />
+          </AuthProvider>
+        </MemoryRouter>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: /Sign in to LedgerLine/i })).toBeInTheDocument()
+      })
+
+      expect(screen.queryByText(/Quick Demo Logins/i)).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Admin/i })).not.toBeInTheDocument()
+    } finally {
+      ;(import.meta.env as Record<string, unknown>).DEV = originalDev
+      ;(import.meta.env as Record<string, unknown>).VITE_ENABLE_DEMO_CREDENTIALS = originalFlag
+    }
+  })
 })

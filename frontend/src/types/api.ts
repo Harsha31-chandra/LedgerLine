@@ -15,7 +15,7 @@ export interface User {
 }
 
 export type AccountStatus = 'ACTIVE' | 'FROZEN' | 'CLOSED'
-export type MembershipRole = 'OWNER' | 'SIGNER' | 'VIEWER'
+export type MembershipRole = 'OWNER' | 'OPERATOR' | 'VIEWER'
 
 export interface Account {
   id: string
