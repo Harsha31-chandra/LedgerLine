@@ -266,18 +266,185 @@ To prevent privilege escalation where a database membership record might grant `
   - **In-Flight Double-Click Prevention:** Form submit actions immediately set `isSubmitting=true` and disable UI buttons until the backend responds.
   - **Backend as Authoritative Source of Truth:** The frontend performs zero authoritative balance calculations. Balances, transaction statuses, and chronological statements are rendered exclusively from authenticated backend ledger responses.
 
+#### G. Database Ledger Immutability, Privilege Separation & Fail-Closed Runtime Threats
+- **Threat:** An attacker who gains SQL injection, an insider with database access, or a compromised application query attempts to execute `UPDATE`, `DELETE`, or `TRUNCATE` against historical ledger entries to alter balance records, conceal embezzlement, or forge transactions.
+- **Threat:** Using a custom session parameter (e.g. `SET ledgerline.allow_ledger_maintenance = 'true'`) as a trigger bypass provides no security boundary because any SQL execution path can set session variables.
+- **Threat:** Running application connections under a table-owner or superuser role allows attackers to drop triggers, alter schema definitions, disable immutability guards, or grant themselves elevated privileges.
+- **Threat:** Silent fallback to privileged connection URLs or misconfigured runtime database URLs leaves the application operating under administrative database privileges.
+- **Threat:** Deploying to production with unrestricted database connectivity allows accidental or malicious connection to unauthorized hosts, rogue databases, or test databases containing simulated financial data.
+- **Threat:** Routine schema migrations requiring cluster superuser privileges create operational vulnerabilities where migrations can alter cluster-wide configurations, create arbitrary superusers, or access out-of-scope system catalogs.
+- **Mitigation:**
+  - **Row-Level Immutability Trigger (`trg_ledger_entries_immutability`):** Executes `protect_ledger_entries_immutability()` `BEFORE UPDATE OR DELETE ON ledger_entries FOR EACH ROW`, raising an exception with SQLSTATE `20000` on any UPDATE or DELETE attempt.
+  - **Statement-Level Truncate Protection (`trg_ledger_entries_truncate`):** Executes `protect_ledger_entries_truncate()` `BEFORE TRUNCATE ON ledger_entries FOR EACH STATEMENT`, raising an exception with SQLSTATE `20000`.
+  - **Zero Session-Variable Bypass:** No maintenance bypass is provided in the trigger functions. All modifications and deletions are unconditionally rejected.
+  - **Three-Tier Database Role Separation:**
+    - **Bootstrap Administrator (`ledgerline`):** Dedicated cluster administrator (`POSTGRES_USER`). Used exclusively for initial container provisioning and database creation. Never used for application runtime or routine migrations.
+    - **Migration / Schema-Owner Role (`ledgerline_migrator`):** Dedicated least-privilege migration role (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`). Owns the `public` schema and all domain tables/functions. Routine Alembic migrations execute under `ledgerline_migrator` via `MIGRATION_DATABASE_URL` without superuser privileges. Cannot create superusers or alter other roles (rejected with SQLSTATE `42501`).
+    - **Application Runtime Role (`ledgerline_app`):** Dedicated non-superuser role (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`). Holds zero DDL, zero superuser, and zero maintenance privileges.
+  - **Least Privilege Table Grants & Default Privileges:** `ledgerline_app` possesses strictly `SELECT, INSERT` on `ledger_entries` and `audit_events` (zero UPDATE, DELETE, or TRUNCATE). `scripts/init_db.sql` configures default privileges for `ledgerline_migrator`, and migration `c18f3a8b9e10` explicitly executes `REVOKE UPDATE, DELETE, TRUNCATE` on immutable tables to enforce least privilege.
+  - **Table Ownership Boundary:** `ledgerline_app` does not own `ledger_entries` or any other domain table. PostgreSQL rejects `ALTER TABLE ... DISABLE TRIGGER`, `DROP TRIGGER`, and `ALTER TABLE ... OWNER TO` with SQLSTATE `42501` (`must be owner of table ledger_entries`).
+  - **Environment-Aware Fail-Closed Database URL Validation:**
+    - In local development and test environments, `validate_runtime_database_url` strictly confines connections to local loopback hosts (`localhost`, `127.0.0.1`, `::1`), port 5432, and approved databases (`ledgerline`, `ledgerline_test`).
+    - In production environments, `validate_runtime_database_url` requires explicit, non-empty allowlists via `DB_ALLOWED_HOSTS` and `DB_ALLOWED_DATABASES`. If either allowlist is missing or empty, startup fails closed immediately (zero unrestricted access).
+    - In production, test database targets (`ledgerline_test`, `*_test`, `test_*`) and SQLite engines are strictly rejected.
+    - Across all environments, `APPROVED_RUNTIME_ROLE = "ledgerline_app"` is enforced, and privileged roles (`PROHIBITED_RUNTIME_ROLES = frozenset({"ledgerline", "ledgerline_migrator", "postgres", "root", "admin"})`) are unconditionally rejected.
+  - **Zero Fallback:** `create_app_engine()` strictly requires an approved runtime database URL. If missing or invalid, engine creation raises `ValueError` immediately rather than falling back to privileged migration settings.
+  - **Isolated Test-Administration Maintenance Mechanism:** Integration test fixtures are cleaned up using the isolated test database schema-owner connection (`ledgerline_migrator`), which holds table-owner privileges to disable the trigger temporarily during test teardown and re-enables it in a `finally` block. Runtime application connections cannot execute this teardown mechanism.
+
+#### H. Database Timestamp Consistency, Temporal Tampering & Stale Metadata Threats
+- **Threat:** Operational modifications performed via direct SQL (administrative scripts, bulk data migrations, or raw SQL queries) bypass client-side and ORM `onupdate` hooks, leaving `updated_at` timestamps stale and undermining temporal audits, cache invalidation, and replication tracking.
+- **Threat:** An attacker or malicious client attempts to backdate accounts or transactions by supplying a forged `created_at` or `updated_at` value in an UPDATE payload.
+- **Threat:** Spurious timestamp increments on no-op updates (where no row attributes actually changed) corrupt change-data-capture pipelines and audit logs with false change events.
+- **Mitigation:**
+  - **Server-Side Timestamp Trigger (`update_updated_at_column`):** Attached `BEFORE UPDATE` to all mutable entities (`accounts`, `users`, `transactions`). Automatically evaluates `NEW.updated_at = clock_timestamp()` directly inside PostgreSQL, guaranteeing fresh timestamps on both ORM and raw SQL updates.
+  - **`created_at` Immutability Protection:** Enforces `NEW.created_at = OLD.created_at`, physically blocking any attempt to modify or backdate creation timestamps on existing records.
+  - **No-Op Update Suppression:** Evaluates `IF (NEW IS NOT DISTINCT FROM OLD) THEN RETURN OLD; END IF;`, ensuring that updates leaving all column values identical do not modify `updated_at`.
+  - **Client Forgery Override:** Any client-supplied `updated_at` value in an UPDATE statement is unconditionally overwritten with PostgreSQL's authoritative `clock_timestamp()`.
+  - **Table Ownership Security:** The trigger function and table triggers are owned by `ledgerline_migrator`. The runtime application role `ledgerline_app` is denied table-owner privileges and cannot disable, drop, or alter timestamp triggers (SQLSTATE `42501`).
+  - **Immutable Table Exclusion:** Immutable tables (`ledger_entries`, `audit_events`) are strictly excluded from update triggers to preserve their append-only double-entry integrity.
+
 ## Trust Boundaries
 
-*To be documented as implementation progresses.*
+LedgerLine establishes four primary trust boundaries separating external untrusted actors, proxy layers, backend processing services, and internal data persistence tiers:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        UNTRUSTED EXTERNAL CLIENT                       │
+│             (Web Browsers, Automated Attackers, Mobile Clients)         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                         [ TRUST BOUNDARY 1 ]
+                      Reverse Proxy & TLS Ingress
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       REVERSE PROXY TIER (Nginx)                       │
+│  - Static Asset Delivery                                               │
+│  - Port 3000 published to host; internal proxy-net (172.28.1.10)       │
+│  - Appends X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host        │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                         [ TRUST BOUNDARY 2 ]
+                 Proxy-to-Backend Network Boundary
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      APPLICATION TIER (FastAPI)                        │
+│  - Internal port 8000 (NOT published to host)                          │
+│  - FORWARDED_ALLOW_IPS: "127.0.0.1,172.28.1.10" (Nginx trust only)    │
+│  - CSRF Protect Middleware (Allowed Origins whitelist)                │
+│  - Rate Limiting (slowapi: 5/min register, 10/min login)               │
+│  - Strict Payload Hardening (Pydantic extra='forbid')                  │
+│  - Cookie Session Resolution (Argon2id, SHA-256 session token hash)    │
+│  - Route-by-Route RBAC & Anti-IDOR Authorization Service              │
+│  - Double-Entry Balance Invariant & Deterministic Lock Manager         │
+│  - Recursive Credential Scrubbing Audit Engine                         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                         [ TRUST BOUNDARY 3 ]
+              Application-to-Database Network Boundary
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                    DATABASE PERSISTENCE (PostgreSQL)                   │
+│  - Internal db-net (Port 5432 NOT published in default/staging)        │
+│  - Non-superuser runtime role: ledgerline_app (least privilege)        │
+│  - Migrations run as: ledgerline_migrator (schema owner, non-superuser) │
+│  - Physical Check Constraints (ck_accounts_balance_non_negative)       │
+│  - Row-Level Immutability Trigger (protect_ledger_entries_immutability)│
+│  - Statement Truncate Trigger (protect_ledger_entries_truncate)        │
+│  - Updated-At Timestamp Triggers with Clock Timestamp & No-Op Filter   │
+│  - REVOKE UPDATE, DELETE, TRUNCATE on ledger_entries and audit_events  │
+└────────────────────────────────────────────────────────────────────────┘
+
+                         [ TRUST BOUNDARY 4 ]
+           Identity Assertion & Row-Level Security Boundary
+  - Database Row-Level Security (RLS) is currently DISABLED.
+  - Custom PostgreSQL session GUCs are NOT trusted identity mechanisms.
+  - Authorization is verified strictly in the FastAPI application layer.
+```
+
+### Trust Boundary Analysis
+
+1. **Boundary 1: External Client <-> Reverse Proxy (Nginx Ingress)**
+   - Untrusted clients interact with the published Nginx port (port 3000 in staging).
+   - Nginx handles static file delivery, routes API requests to backend, and enforces header sanitization.
+   - Client browsers are fundamentally untrusted execution environments; no sensitive secrets or authoritative calculations are placed on the client.
+
+2. **Boundary 2: Reverse Proxy (Nginx) <-> Backend API (FastAPI / Uvicorn)**
+   - Communicates across the internal Docker bridge network `proxy-net`.
+   - Backend trusts forwarded headers (`X-Forwarded-For`, `X-Forwarded-Proto`) strictly from `127.0.0.1` and `172.28.1.10` (the guaranteed static IP of Nginx). Wildcard CIDR ranges (`172.16.0.0/12`) are explicitly prohibited.
+   - All state-changing requests must pass strict canonical origin verification (`CSRFProtectMiddleware`).
+   - All request bodies are strictly filtered against Pydantic models with `model_config = ConfigDict(extra="forbid")`.
+
+3. **Boundary 3: Backend Application Service <-> PostgreSQL Database**
+   - Communicates across the isolated internal Docker bridge network `db-net`.
+   - The database port `5432` has zero host port publishing in staging/production (`docker-compose.yml`). Host access is available strictly through a developer override (`docker-compose.dev.yml`) binding exclusively to `127.0.0.1`.
+   - Application connects strictly as `ledgerline_app`, possessing zero DDL, zero superuser, and zero update/delete permissions on ledger journals and audit records.
+   - Database check constraints and triggers enforce financial integrity even if application logic were corrupted.
+
+4. **Boundary 4: Identity & Authorization Boundary (Application vs Database Layer)**
+   - All role-based access control (ADMIN, HOLDER, AUDITOR), account-level permissions (OWNER, OPERATOR, VIEWER), and anti-IDOR checks are evaluated and enforced exclusively within the FastAPI application layer.
+   - Database-level Row-Level Security (RLS) is currently **DISABLED**.
+   - PostgreSQL custom session settings / GUCs (`app.current_user_id`, `pg_temp._active_context`) are recognized as vulnerable to transaction reuse, connection pooling replay, and unprivileged GUC tampering, and are **NOT** utilized as trusted security boundaries.
+
+---
 
 ## Threat Actors
 
-*To be documented as implementation progresses.*
+| Threat Actor | Description & Motivation | Capabilities & Access Level |
+| :--- | :--- | :--- |
+| **External Unauthenticated Attacker** | Internet scanners, script kiddies, and credential stuffers seeking unauthorized access, information leaks, or service disruption. | Unauthenticated HTTP/HTTPS access to public ingress. Can forge request headers, guess URLs, replay requests, and attempt brute-force login/registration. |
+| **Malicious Authenticated Customer (`HOLDER`)** | Legitimate system user attempting to access other users' accounts, steal funds, or escalate administrative privileges. | Valid session cookie as `UserRole.HOLDER`. Can invoke authenticated endpoints. Attempts IDOR/BOLA by supplying other customers' UUIDs, concurrent race condition requests, or mass assignment payloads. |
+| **Compromised / Rogue Auditor (`AUDITOR`)** | Regulatory compliance user attempting to execute financial transactions or alter account data under the guise of audit authority. | Valid session cookie as `UserRole.AUDITOR`. Authorized to read audit logs and inspect accounts. Attempts write actions (`deposit`, `withdraw`, `transfer`, `patch`) or membership elevation. |
+| **Rogue Account Member (`VIEWER` / `OPERATOR`)** | User granted limited delegate access to an account who attempts operations exceeding their assigned role. | Valid membership on a specific account as `VIEWER` or `OPERATOR`. Attempts unauthorized withdrawals (`VIEWER`) or account renaming/delegation (`OPERATOR`). |
+| **Database Network Intruder / SQL Adversary** | Adversary who gains network access to PostgreSQL or achieves partial SQL query injection. | Direct SQL execution capability under the `ledgerline_app` runtime database role. Attempts `UPDATE`, `DELETE`, or `TRUNCATE` against ledger history or audit logs. |
+
+---
 
 ## Threat Register
 
-*To be populated with specific threats, attack paths, mitigations, test IDs and residual risks.*
+| ID | Threat & Attack Scenario | Primary Impact | Existing Mitigation & Security Controls | Automated Test Verification | Residual Risk |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **THR-01** | **BOLA / IDOR on Account Details, Metadata & Statements:** Authenticated attacker replaces their account UUID with victim's UUID in `GET /accounts/{id}`, `PATCH /accounts/{id}`, or `GET /accounts/{id}/statement`. | Confidentiality & Integrity breach; unauthorized account inspection or tampering. | `get_account_for_user()` requires active membership. Unauthorized lookups raise `AccountNotFoundError` (HTTP 404 anti-enumeration). | `tests/security/test_idor_bola.py::test_idor_prevented_on_get_account_detail`<br>`tests/security/test_idor_bola.py::test_idor_prevented_on_patch_account_metadata`<br>`tests/security/test_idor_bola.py::test_idor_prevented_on_get_statement` | Application-level check; RLS disabled at database tier. |
+| **THR-02** | **BOLA / IDOR on Financial Operations:** Attacker submits `POST /transactions/deposit`, `withdraw`, or `transfer` targeting an unowned victim account. | Theft of funds; unauthorized debit or credit. | `execute_deposit`, `execute_withdrawal`, and `execute_transfer` enforce `AccountAction.OPERATE` membership via `get_account_for_user`. Rejects unowned accounts with HTTP 404. | `tests/security/test_idor_bola.py::test_idor_prevented_on_deposit_to_unowned_account`<br>`tests/security/test_idor_bola.py::test_idor_prevented_on_withdraw_from_unowned_account`<br>`tests/security/test_idor_bola.py::test_idor_prevented_on_transfer_from_unowned_source_account` | Requires active application runtime enforcement. |
+| **THR-03** | **BOLA / IDOR on Transaction Inspection:** Attacker attempts `GET /transactions/{id}` for a peer-to-peer transaction between third parties. | Privacy leak of financial counterparty details and amounts. | `get_transaction_by_id` checks active membership in at least one involved account. Non-members receive HTTP 404. | `tests/security/test_idor_bola.py::test_idor_prevented_on_get_transaction_by_unrelated_user`<br>`tests/security/test_idor_bola.py::test_idor_prevented_on_peer_transfer_for_third_party` | None; verified anti-enumeration. |
+| **THR-04** | **Privilege Escalation to Admin Endpoints:** Ordinary `HOLDER` or `AUDITOR` attempts `POST /accounts`, `POST /accounts/{id}/status`, or `GET /admin/accounts`. | Unauthorized account creation, account freezing, or system registry enumeration. | `require_admin` dependency enforces `UserRole.ADMIN`. Rejects non-admin users with HTTP 403 Forbidden. DB state remains untouched. | `tests/security/test_role_enforcement_and_escalation.py::TestGlobalAdminRoleEnforcement` | None. |
+| **THR-05** | **Auditor Write Action Violation & Escalation:** `AUDITOR` attempts `deposit`, `withdraw`, `transfer`, or `PATCH /accounts/{id}`. Even if an auditor holds `OWNER` membership in DB, write actions must be blocked. | Unauthorized ledger mutations by compliance personnel. | `check_account_permission` enforces that if `user.role == UserRole.AUDITOR`, all `WRITE_ACCOUNT_ACTIONS` raise `AuditorReadOnlyViolationError` (HTTP 403). Global auditor policy strictly overrides membership role. | `tests/security/test_role_enforcement_and_escalation.py::TestAuditorReadOnlyRestrictions` | None. Global read-only constraint verified. |
+| **THR-06** | **Account Membership Role Violation:** `VIEWER` member attempts operational mutation (`deposit`, `withdraw`, `transfer`), or `OPERATOR` attempts `PATCH /accounts/{id}`. | Unauthorized money movement or account metadata modification. | Granular role hierarchy: `OPERATE` requires `OPERATOR`; `UPDATE_DETAILS` and `MANAGE_MEMBERS` require `OWNER`. Violations raise HTTP 403. | `tests/security/test_role_enforcement_and_escalation.py::TestAccountMembershipRoleEnforcement` | None. |
+| **THR-07** | **Mass Assignment & Parameter Injection:** Attacker injects extra fields (e.g. `role='ADMIN'`, `balance=999999`, `is_active=False`, `status='ACTIVE'`) into registration, account creation, patch, or transaction payloads. | Privilege escalation or arbitrary balance modification. | All Pydantic request models configure `model_config = ConfigDict(extra="forbid")`. Unapproved fields trigger HTTP 422 immediately before service execution. | `tests/security/test_mass_assignment_and_payload_hardening.py` | None. |
+| **THR-08** | **Session Hijacking, Replay & Inactive User Exploitation:** Use of missing, malformed, expired, or revoked sessions, or access by deactivated users (`is_active=False`). | Unauthorized session takeover or continued access by terminated employees. | `validate_session` verifies SHA-256 token hash, unexpired UTC timestamps, unrevoked status, and `is_active=True`. Fails closed with HTTP 401 or HTTP 403. | `tests/security/test_session_and_inactive_users.py::TestSessionValidationAndLifecycle`<br>`tests/security/test_session_and_inactive_users.py::TestInactiveUserRejection` | In-memory session tracking not used; relies on DB lookup. |
+| **THR-09** | **Revoked Membership Continued Access:** User whose account membership row was deleted attempts continued operations or data retrieval. | Unauthorized post-revocation access to account. | Dynamic per-request membership lookup raises `AccountNotFoundError` (HTTP 404 anti-IDOR). | `tests/security/test_session_and_inactive_users.py::TestRevokedMembershipBehavior` | None. |
+| **THR-10** | **Sensitive Credential Exposure in Audit Trail:** Plaintext passwords, tokens, API keys, or session secrets logged to `audit_events.event_metadata`. | Credential exfiltration via audit logs or administrative consoles. | `record_audit_event` recursively sanitizes metadata against `forbidden_keys` (`password`, `token`, `raw_token`, `password_hash`, `token_hash`, `secret`, `session_secret`, `api_key`, `credentials`). | `tests/security/test_audit_and_immutability_security.py::TestCredentialScrubbingInAuditTrail` | None. |
+| **THR-11** | **Concurrent Double-Spend Race Condition:** Concurrent withdrawal/transfer requests read positive balance simultaneously, causing negative account balance. | Ledger corruption; unbacked money extraction. | Pessimistic row-level locking (`SELECT ... FOR UPDATE` with sorted UUID lock ordering), re-check under lock, and PostgreSQL `ck_accounts_balance_non_negative` constraint. | `tests/integration/test_concurrency_postgres.py` | None. Race conditions serialized by database row locks. |
+| **THR-12** | **Duplicate Request Replay / Timeout Retry:** Network retry causes duplicate deposit, withdrawal, or transfer execution. | Duplicate money movement. | `idempotency_records` table with composite key `(user_id, idempotency_key)`, canonical payload SHA-256 hashing, atomic reservation, and cached response replay. | `tests/unit/test_transaction_service.py` | Idempotency keys expire after 24h. |
+| **THR-13** | **Direct SQL Ledger & Audit Log Tampering:** Adversary with SQL access under application role attempts `UPDATE`, `DELETE`, or `TRUNCATE` against `ledger_entries` or `audit_events`. | History tampering; concealment of embezzlement. | PostgreSQL triggers `trg_ledger_entries_immutability` and `trg_ledger_entries_truncate` raise SQLSTATE `20000`. Table grants explicitly revoke `UPDATE, DELETE, TRUNCATE` from `ledgerline_app`. | `tests/integration/test_ledger_immutability_postgres.py` | Table owner (`ledgerline_migrator`) can alter triggers during maintenance. |
+| **THR-14** | **Database Timestamp Backdating & Forgery:** Adversary attempts to backdate records by forging `created_at` or `updated_at` in SQL queries. | Tampered audit timelines. | Server-side trigger `update_updated_at_column` enforces `NEW.updated_at = clock_timestamp()` and `NEW.created_at = OLD.created_at` with no-op update suppression. | `tests/integration/test_timestamp_consistency_postgres.py` | None. |
+| **THR-15** | **Cross-Site Request Forgery (CSRF):** Malicious site triggers state-changing actions via user's ambient session cookies. | Unauthorized financial operations executed in victim's browser context. | `CSRFProtectMiddleware` strictly validates canonical `Origin` and `Referer` against configured `cors_origins_list`. Cookies configure `SameSite=Lax`. | `tests/unit/test_csrf.py` | Non-browser clients must pass valid Origin/Referer header. |
+| **THR-16** | **Staging Network Exposure & Trusted Proxy Spoofing:** Attacker probes exposed database ports or spoofs `X-Forwarded-For` to bypass IP controls. | Database breach; IP spoofing in audit logs. | `docker-compose.yml` removes database host port publishing entirely. Uvicorn configured with `FORWARDED_ALLOW_IPS: "127.0.0.1,172.28.1.10"` (guaranteed static IP of Nginx). | Verified via containerization inspection and `docker-compose.yml`. | None on internal bridge networks. |
+
+---
 
 ## Residual Risks
 
-*To be stated honestly for threats not fully mitigated.*
+The following residual risks are explicitly recognized and documented:
+
+1. **Database Row-Level Security (RLS) is Disabled:**
+   - PostgreSQL Row-Level Security is currently **NOT enabled** on domain tables.
+   - All tenant isolation, BOLA/IDOR protection, and role-based permissions are enforced strictly in the FastAPI application and ORM service layer.
+   - If an attacker obtains direct arbitrary SQL execution access to the database under the `ledgerline_app` user, the database will not restrict `SELECT` queries across customer accounts.
+
+2. **Custom PostgreSQL GUC Session Identity is Untrusted:**
+   - Proposed mechanisms utilizing session-level GUCs (e.g. `SET LOCAL app.current_user_id = ...` or `pg_temp._active_context`) are **NOT trusted** as a security boundary.
+   - Because connection poolers (PgBouncer, SQLAlchemy connection pooling) reuse physical connections, and unprivileged SQL callers can issue `SET` statements or alter session variables, custom GUC claims cannot establish a tamper-proof cryptographic identity boundary without secure hardware or signed assertion protocols.
+   - Application-layer authentication and transaction isolation remain the primary authoritative boundary.
+
+3. **In-Memory Rate Limiting Scope:**
+   - Public endpoint rate limiting via `slowapi` maintains counters in process-local memory.
+   - In horizontally scaled deployments with multiple container replicas or Uvicorn worker processes, rate limits are not shared across workers without a centralized Redis cache.
+
+4. **Fixed Session Expiry:**
+   - User sessions utilize a fixed 24-hour expiration window. Sliding window session extension has not been implemented.
+
+5. **Single-Node Infrastructure:**
+   - The current staging deployment is containerized on a single Docker host. Multi-region database replication, automated cluster failover, and hardware security modules (HSM) for cryptographic keys remain future architectural enhancements.

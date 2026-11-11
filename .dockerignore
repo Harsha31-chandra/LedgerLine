@@ -1,0 +1,27 @@
+# Secrets and environment files
+.env
+.env.*
+
+# Git
+.git/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/src/test/
+
+# OS and IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

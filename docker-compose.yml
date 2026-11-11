@@ -1,27 +1,123 @@
-# LedgerLine — Local Development Services
-# Start:  docker compose up -d
-# Stop:   docker compose down
-# Reset:  docker compose down -v  (deletes data)
+# LedgerLine — Containerized Staging & Local Orchestration
+# Default configuration: strict network isolation, no host database exposure.
+# Start:  docker compose up -d --build
+# Stop:   docker compose down  (preserves database volume)
+# For local dev host database access (127.0.0.1:5432):
+#         docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 services:
   db:
     image: postgres:16.8-alpine
     container_name: ledgerline-db
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     environment:
-      POSTGRES_USER: ledgerline
-      POSTGRES_PASSWORD: ledgerline_dev
-      POSTGRES_DB: ledgerline
+      POSTGRES_USER: ${POSTGRES_USER:-ledgerline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgerline_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-ledgerline}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledgerline"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ledgerline}"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - db-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ledgerline-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "${PORT:-10000}"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PORT: ${PORT:-10000}
+      APP_DATABASE_URL: postgresql://ledgerline_app:${DB_APP_PASSWORD:-ledgerline_app_dev}@db:5432/${POSTGRES_DB:-ledgerline}
+      DATABASE_URL: postgresql://ledgerline_app:${DB_APP_PASSWORD:-ledgerline_app_dev}@db:5432/${POSTGRES_DB:-ledgerline}
+      DB_ALLOWED_HOSTS: ${DB_ALLOWED_HOSTS:-db}
+      DB_ALLOWED_DATABASES: ${DB_ALLOWED_DATABASES:-ledgerline}
+      DB_ALLOWED_PORTS: ${DB_ALLOWED_PORTS:-5432}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-to-a-secure-32-char-random-key-for-staging}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-ledgerline_session}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-1440}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.28.1.10}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:${PORT:-10000}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - proxy-net
+      - db-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ledgerline-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    environment:
+      PORT: 80
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-http://backend:10000}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:80/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      proxy-net:
+        ipv4_address: 172.28.1.10
+
+  migrator:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ledgerline-migrator
+    profiles:
+      - ops
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      MIGRATION_DATABASE_URL: postgresql://ledgerline_migrator:${DB_MIGRATOR_PASSWORD:-ledgerline_migrator_dev}@db:5432/${POSTGRES_DB:-ledgerline}
+      DB_ALLOWED_HOSTS: ${DB_ALLOWED_HOSTS:-db}
+      DB_ALLOWED_DATABASES: ${DB_ALLOWED_DATABASES:-ledgerline}
+      DB_ALLOWED_PORTS: ${DB_ALLOWED_PORTS:-5432}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-to-a-secure-32-char-random-key-for-staging}
+    command: ["alembic", "-c", "backend/alembic.ini", "upgrade", "head"]
+    networks:
+      - db-net
 
 volumes:
   pgdata:
+
+networks:
+  proxy-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+  db-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.2.0/24

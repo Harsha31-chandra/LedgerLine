@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session as DbSession
 from backend.app.core.exceptions import (
     AccountNotFoundError,
     AccountStatusError,
+    AuditorReadOnlyViolationError,
     InactiveUserError,
     InsufficientRoleError,
 )
@@ -39,8 +40,10 @@ SYSTEM_VAULT_INITIAL_BALANCE = 0  # Starts at 0; strictly reflects double-entry 
 
 __all__ = [
     "SYSTEM_CLEARING_ACCOUNT_NUMBER",
+    "assign_account_membership",
     "change_account_status",
     "create_account",
+    "create_onboarding_account",
     "get_account_by_id",
     "get_or_create_system_clearing_account",
     "list_all_accounts",
@@ -174,6 +177,134 @@ def create_account(
     return account, membership
 
 
+def create_onboarding_account(
+    db: DbSession,
+    user: User,
+    account_name: str,
+    currency: str = "INR",
+    initial_deposit_paise: int = 0,
+    ip_address: str | None = None,
+) -> tuple[Account, AccountMembership]:
+    """Create a new financial account for the authenticated user during self-service onboarding.
+
+    Enforces:
+    - User must be active.
+    - Auditor role is prohibited from creating accounts (read-only).
+    - Designates authenticated user as initial OWNER.
+    - Optional demo initial deposit:
+      - Validates settings.enable_demo_funds is True.
+      - Enforces that user has not previously claimed demo funds.
+      - Executes double-entry deposit through execute_deposit (debits SYSTEM_CLEARING, credits account).
+      - Records DEMO_INITIAL_DEPOSIT_CLAIMED in audit_events.
+    - Records ACCOUNT_CREATED audit event.
+    - Commits transaction atomically.
+    """
+    from backend.app.config import settings
+    from backend.app.models.audit_event import AuditEvent
+    from backend.app.services.transaction_service import execute_deposit
+
+    if not user.is_active:
+        raise InactiveUserError(f"User {user.id} is inactive")
+
+    if user.role == UserRole.AUDITOR:
+        raise AuditorReadOnlyViolationError("Auditor role is restricted to read-only access")
+
+    cleaned_name = account_name.strip()
+    if not cleaned_name:
+        raise ValueError("Account name cannot be empty")
+
+    cleaned_currency = currency.strip().upper()
+    if len(cleaned_currency) != 3:
+        raise ValueError("Currency must be a 3-character ISO code")
+
+    # Generate unique account number
+    account_number = _generate_account_number()
+    while db.scalars(select(Account).where(Account.account_number == account_number)).first() is not None:
+        account_number = _generate_account_number()
+
+    # 1. Create Account entity
+    account = Account(
+        account_number=account_number,
+        account_name=cleaned_name,
+        currency=cleaned_currency,
+        balance=0,
+        status=AccountStatus.ACTIVE.value,
+    )
+    db.add(account)
+    db.flush()
+
+    # 2. Atomically create initial OWNER membership
+    membership = AccountMembership(
+        user_id=user.id,
+        account_id=account.id,
+        membership_role=MembershipRole.OWNER.value,
+    )
+    db.add(membership)
+    db.flush()
+
+    # 3. Record Account Created Audit Event
+    record_audit_event(
+        db=db,
+        action="ACCOUNT_CREATED",
+        entity_type="Account",
+        entity_id=account.id,
+        actor_user_id=user.id,
+        metadata={
+            "account_number": account.account_number,
+            "account_name": account.account_name,
+            "owner_user_id": str(user.id),
+            "source": "onboarding",
+        },
+        ip_address=ip_address,
+    )
+
+    # 4. Handle optional Demo Opening Deposit
+    if initial_deposit_paise > 0:
+        if not settings.enable_demo_funds:
+            raise ValueError("Demo opening funds are not enabled in this environment")
+
+        if initial_deposit_paise > 1_000_000:
+            raise ValueError("Demo opening deposit cannot exceed ₹10,000 (1,000,000 paise)")
+
+        # Verify user has not already claimed demo funds
+        stmt = select(AuditEvent).where(
+            AuditEvent.actor_user_id == user.id,
+            AuditEvent.action == "DEMO_INITIAL_DEPOSIT_CLAIMED",
+        )
+        if db.scalars(stmt).first() is not None:
+            raise ValueError("Demo funds have already been claimed for this user account")
+
+        # Execute double-entry deposit through execute_deposit
+        execute_deposit(
+            db=db,
+            user=user,
+            account_id=account.id,
+            amount_paise=initial_deposit_paise,
+            idempotency_key=f"onboard-{account.id}",
+            description="Demo Funds — Initial Sample Opening Balance",
+            ip_address=ip_address,
+        )
+
+        record_audit_event(
+            db=db,
+            action="DEMO_INITIAL_DEPOSIT_CLAIMED",
+            entity_type="Account",
+            entity_id=account.id,
+            actor_user_id=user.id,
+            metadata={
+                "account_id": str(account.id),
+                "account_number": account.account_number,
+                "amount_paise": initial_deposit_paise,
+            },
+            ip_address=ip_address,
+        )
+
+    db.commit()
+    db.refresh(account)
+    db.refresh(membership)
+    return account, membership
+
+
 def get_account_by_id(
     db: DbSession,
     user: User,
@@ -282,6 +413,7 @@ def update_account_details(
     return account
 
 
+
 def change_account_status(
     db: DbSession,
     admin_user: User,
@@ -307,11 +439,73 @@ def change_account_status(
         db=db,
         action="ACCOUNT_STATUS_CHANGED",
         entity_type="Account",
-        entity_id=account.id,
+        entity_id=str(account.id),
         actor_user_id=admin_user.id,
-        metadata={"old_status": old_status, "new_status": new_status.value},
+        metadata={
+            "account_id": str(account.id),
+            "account_number": account.account_number,
+            "old_status": old_status,
+            "new_status": new_status.value,
+        },
         ip_address=ip_address,
     )
+
     db.commit()
     db.refresh(account)
     return account
+
+
+def assign_account_membership(
+    db: DbSession,
+    admin_user: User,
+    account_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MembershipRole,
+    ip_address: str | None = None,
+) -> AccountMembership:
+    """Assign or update a user's membership role on an account. Admin only."""
+    check_system_permission(admin_user, SystemAction.MANAGE_USERS)
+
+    account = db.get(Account, account_id)
+    if account is None or account.account_number == SYSTEM_CLEARING_ACCOUNT_NUMBER:
+        raise AccountNotFoundError(f"Account {account_id} not found")
+
+    target_user = db.get(User, user_id)
+    if target_user is None:
+        raise ValueError(f"User {user_id} not found")
+    if not target_user.is_active:
+        raise InactiveUserError(f"User {user_id} is inactive")
+
+    stmt = select(AccountMembership).where(
+        AccountMembership.user_id == user_id,
+        AccountMembership.account_id == account_id,
+    )
+    membership = db.scalars(stmt).first()
+    if membership is not None:
+        membership.membership_role = role.value
+    else:
+        membership = AccountMembership(
+            user_id=user_id,
+            account_id=account_id,
+            membership_role=role.value,
+        )
+        db.add(membership)
+
+    record_audit_event(
+        db=db,
+        action="MEMBERSHIP_ASSIGNED",
+        entity_type="AccountMembership",
+        entity_id=account.id,
+        actor_user_id=admin_user.id,
+        metadata={
+            "account_id": str(account.id),
+            "account_number": account.account_number,
+            "target_user_id": str(user_id),
+            "membership_role": role.value,
+        },
+        ip_address=ip_address,
+    )
+    db.commit()
+    db.refresh(membership)
+    return membership
+

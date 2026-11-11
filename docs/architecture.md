@@ -41,7 +41,7 @@ The foundational relational schema is defined by eight SQLAlchemy 2.x declarativ
 3. **`accounts`**: Financial accounts with integer paise balance cache, unique indexed account number, and status (`ACTIVE`, `FROZEN`, `CLOSED`).
 4. **`account_memberships`**: User-to-account entitlements (`OWNER`, `OPERATOR`, `VIEWER`) with compound unique constraint `(user_id, account_id)` preventing BOLA/IDOR vulnerabilities.
 5. **`transactions`**: Business intent headers tracking reference, operation type (`DEPOSIT`, `WITHDRAWAL`, `TRANSFER`), and lifecycle status (`PENDING`, `POSTED`, `REJECTED`).
-6. **`ledger_entries`**: Double-entry financial journal lines (`DEBIT`, `CREDIT`, positive `amount_paise`). Foreign keys to `accounts` and `transactions` specify `ondelete='RESTRICT'`, which protects referenced parent records from deletion while ledger entries reference them (note: database-enforced immutability preventing direct `UPDATE` or `DELETE` on ledger entries themselves is not yet implemented).
+6. **`ledger_entries`**: Double-entry financial journal lines (`DEBIT`, `CREDIT`, positive `amount_paise`). Foreign keys to `accounts` and `transactions` specify `ondelete='RESTRICT'`, which protects referenced parent records from deletion while ledger entries reference them. Protected by PostgreSQL engine-level triggers `trg_ledger_entries_immutability` and `trg_ledger_entries_truncate` prohibiting all UPDATE, DELETE, and TRUNCATE operations, combined with database role privilege restrictions on runtime application role `ledgerline_app`.
 7. **`idempotency_records`**: Exactly-once execution records with compound unique constraint `(user_id, idempotency_key)`, canonical request hash, and cached response payload.
 8. **`audit_events`**: Append-only security and operational audit trail with composite action/time index and `SET NULL` on actor user reference.
 
@@ -116,24 +116,106 @@ Implemented in `backend/app/services/`:
    - Enrolls `AuditEvent` records directly in the active unit-of-work transaction.
    - Records actor user UUID, client IP, action, entity type/ID, and metadata with sensitive parameter scrubbing.
 
-## Frontend Architecture (React + TypeScript MVP)
+### Database-Enforced Ledger Immutability, Three-Tier Role Separation & Fail-Closed Runtime Policy
 
-The LedgerLine user interface is built as a single-page application integrating with the backend API:
+Implemented in migration `c18f3a8b9e10_enforce_ledger_entries_immutability` and verified by `tests/integration/test_ledger_immutability_postgres.py` and `tests/unit/test_database.py`:
+
+1. **PostgreSQL Immutability Triggers:**
+   - **Row-Level Immutability Trigger (`trg_ledger_entries_immutability`):** Attached `BEFORE UPDATE OR DELETE ON ledger_entries FOR EACH ROW`. Invokes PL/pgSQL function `protect_ledger_entries_immutability()` which raises an exception with SQLSTATE `20000` on any UPDATE or DELETE attempt, rejecting the statement immediately.
+   - **Statement-Level Truncate Trigger (`trg_ledger_entries_truncate`):** Attached `BEFORE TRUNCATE ON ledger_entries FOR EACH STATEMENT`. Invokes PL/pgSQL function `protect_ledger_entries_truncate()` which raises an exception with SQLSTATE `20000` on any TRUNCATE attempt.
+   - **No Session Variable Bypass:** Avoids insecure custom session parameter checks (e.g. `current_setting('ledgerline.allow_ledger_maintenance')`). Trigger protection applies strictly to all execution paths.
+
+2. **Three-Tier Database Role Separation & Least Privilege:**
+   - **Bootstrap Administrator Role (`ledgerline`):** Configured as the PostgreSQL cluster provisioning role (`POSTGRES_USER` in Docker). Dedicated exclusively to cluster bootstrapping, creating databases, and provisioning initial operational roles. Never used for application runtime or routine migrations.
+   - **Routine Migration / Schema-Owner Role (`ledgerline_migrator`):** Dedicated least-privilege migration role created with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`. Owns the `public` schema and all domain tables and functions (`ALTER SCHEMA public OWNER TO ledgerline_migrator`). Alembic migrations execute routine DDL under `ledgerline_migrator` via `MIGRATION_DATABASE_URL` without superuser or role-creation privileges.
+   - **Application Runtime Role (`ledgerline_app`):** Dedicated non-superuser role created with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`. Strictly granted `SELECT, INSERT` on `ledger_entries` and `audit_events`, plus `SELECT, INSERT, UPDATE, DELETE` on mutable operational tables (`users`, `sessions`, `accounts`, `account_memberships`, `transactions`, `idempotency_records`). Holds zero `UPDATE`, `DELETE`, or `TRUNCATE` privileges on the ledger.
+   - **Table Ownership Boundary:** `ledgerline_app` does not own `ledger_entries` or any other domain table. PostgreSQL strictly prohibits non-owners from disabling (`ALTER TABLE ... DISABLE TRIGGER`), dropping (`DROP TRIGGER`), or reassigning ownership (`ALTER TABLE ... OWNER TO`) of database triggers, preventing malicious or accidental tampering even under arbitrary SQL execution (rejected with SQLSTATE `42501: must be owner of table ledger_entries`).
+
+3. **Environment-Aware Fail-Closed Runtime Database Configuration:**
+   - **Fail-Closed Validation (`backend/app/core/database_url.py`):** `validate_runtime_database_url` rigorously parses and validates application database connection strings before engine creation across all deployment environments.
+   - **Local / Test Environments (`app_env in ('development', 'test', 'local')`):**
+     - Target database restricted to approved local databases: `APPROVED_RUNTIME_DATABASES = frozenset({"ledgerline", "ledgerline_test"})`.
+     - Host restricted to local loopback addresses: `APPROVED_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})`.
+     - Port restricted to standard PostgreSQL port `5432` (or explicitly configured `DB_ALLOWED_PORTS`).
+     - SQLite in-memory (`:memory:`) permitted exclusively for isolated unit test overrides; file-based SQLite is rejected.
+   - **Production Environment (`app_env in ('production', 'prod')`):**
+     - Host must be explicitly allowlisted via `DB_ALLOWED_HOSTS`. A missing or empty allowlist fails closed immediately.
+     - Database name must be explicitly allowlisted via `DB_ALLOWED_DATABASES`. A missing or empty allowlist fails closed immediately.
+     - Test database targets (`ledgerline_test`, `*_test`, `test_*`) are unconditionally prohibited in production environments.
+     - SQLite (even in-memory) is strictly prohibited.
+   - **Universal Role Least Privilege (All Environments):**
+     - Runtime connections must strictly use dedicated unprivileged role `APPROVED_RUNTIME_ROLE = "ledgerline_app"`.
+     - Privileged, superuser, bootstrap, and migration roles are unconditionally prohibited: `PROHIBITED_RUNTIME_ROLES = frozenset({"ledgerline", "ledgerline_migrator", "postgres", "root", "admin"})`.
+   - **Zero Fallback (`backend/app/core/database.py`):** `create_app_engine()` resolves `target_url = database_url if database_url is not None else settings.app_database_url` and validates it with `validate_runtime_database_url`. The application runtime will never fall back to a privileged migration URL or superuser credentials.
+   - **Fresh Initialization Default Privileges (`scripts/init_db.sql`):** Configures `ALTER DEFAULT PRIVILEGES FOR ROLE ledgerline_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ledgerline_app;` and `GRANT USAGE, SELECT ON SEQUENCES TO ledgerline_app;`. Migration `c18f3a8b9e10` explicitly enforces `REVOKE UPDATE, DELETE, TRUNCATE ON ledger_entries, audit_events FROM ledgerline_app;`, ensuring newly created domain tables permit normal application operations while immutable tables remain strictly append-only.
+
+4. **Isolated Test-Administration Maintenance Mechanism:**
+   - Production and runtime application roles have zero ledger modification or maintenance privileges.
+   - Integration tests requiring fixture cleanup connect via the isolated test schema owner (`ledgerline_migrator`) using an isolated test-administration connection (`_cleanup_test_records` / `_cleanup_database`). The owner connection temporarily disables `trg_ledger_entries_immutability`, deletes isolated test rows matching specific test fixture references, and re-enables the trigger in a strict `try...finally` block.
+   - The runtime application role `ledgerline_app` cannot execute this cleanup mechanism because PostgreSQL rejects `ALTER TABLE ... DISABLE TRIGGER` with `42501: must be owner of table ledger_entries`.
+
+5. **Reversal Architecture:**
+   - Financial adjustments and reversals must strictly be represented as new compensating transactions and new append-only ledger entries.
+   - Direct mutation or deletion of historical ledger entries is prohibited by both the database engine and the domain architecture.
+
+### Database-Enforced Timestamp Consistency Architecture
+
+Implemented in migration `d4a72e81bc34_enforce_database_updated_at_triggers` and verified by `tests/integration/test_timestamp_consistency_postgres.py`:
+
+1. **Server-Side Timestamp Enforcement (`update_updated_at_column`):**
+   - **Reusable Trigger Function:** PL/pgSQL function `update_updated_at_column()` attached `BEFORE UPDATE` to all mutable tables possessing an `updated_at` column (`accounts`, `users`, `transactions`).
+   - **Guaranteed `updated_at` Freshness:** Automatically assigns `NEW.updated_at = clock_timestamp()` on any row modification, eliminating reliance on client-side or ORM `onupdate` hooks and guaranteeing freshness under direct SQL UPDATEs.
+   - **`created_at` Immutability:** Explicitly sets `NEW.created_at = OLD.created_at`, physically preventing backdating or mutation of record creation timestamps during UPDATE statements.
+   - **No-Op Update Preservation:** Evaluates `IF (NEW IS NOT DISTINCT FROM OLD) THEN RETURN OLD; END IF;`, ensuring that statements updating rows to identical values do not generate spurious timestamp increments.
+   - **Client-Side Forgery Override:** Any client-supplied or forged `updated_at` value in an UPDATE statement is unconditionally overridden by PostgreSQL's authoritative `clock_timestamp()`.
+   - **Timezone Awareness:** All timestamps are stored as PostgreSQL `TIMESTAMPTZ` (UTC).
+
+2. **Table Inclusion & Exclusion Policy:**
+   - **Included Mutable Tables:**
+     - `accounts`: Tracks balance cache snapshot updates, status transitions (`ACTIVE`, `FROZEN`, `CLOSED`), and name changes.
+     - `users`: Tracks profile modifications, password credential rotations, role adjustments, and activation status changes.
+     - `transactions`: Tracks transaction lifecycle transitions (`PENDING` -> `POSTED` / `REJECTED`).
+   - **Intentionally Excluded Immutable & Event Tables:**
+     - `ledger_entries`: Authoritative double-entry ledger. Strictly append-only. UPDATE, DELETE, and TRUNCATE are physically blocked by `trg_ledger_entries_immutability` and `trg_ledger_entries_truncate` (SQLSTATE `20000`). Adding `updated_at` or update triggers would violate core financial immutability.
+     - `audit_events`: Tamper-evident operational audit log. Strictly append-only. Records represent immutable historical events.
+     - `account_memberships`: Junction table mapping users to accounts. Rows are created or deleted. No `updated_at` column exists on the model.
+     - `sessions`: Authentication session records. Employs discrete event timestamps (`created_at`, `expires_at`, `revoked_at`, `last_activity_at`) rather than a general `updated_at`.
+     - `idempotency_records`: Request deduplication cache. Employs `created_at` and `expires_at`.
+
+3. **Role & Privilege Boundary:**
+   - The trigger function `update_updated_at_column()` and all associated triggers are owned by `ledgerline_migrator`.
+   - The application runtime role `ledgerline_app` does not own any domain tables. Any attempt by `ledgerline_app` to disable (`ALTER TABLE ... DISABLE TRIGGER`), drop, or alter timestamp triggers is rejected with SQLSTATE `42501: must be owner of table`.
+
+## Frontend Architecture (React + TypeScript Production SPA)
+
+The LedgerLine user interface is built as a production-grade single-page application integrating with the backend API:
 
 - **Directory Structure (`frontend/src/`):**
-  - **`types/api.ts`**: Strict TypeScript interfaces reflecting FastAPI request and response models (1:1 with Pydantic models: `User`, `Account`, `AccountWithMembership`, `Transaction`, `LedgerEntry`, `AccountStatement`, and request schemas).
-  - **`api/`**: Centralized HTTP client layer (`client.ts`) and modular service wrappers (`auth.ts`, `accounts.ts`, `transactions.ts`). Enforces `credentials: "include"`, standardizes error handling (401, 403, 404, 409, 422, 429), and sets `Idempotency-Key` headers on mutating financial requests.
+  - **`types/api.ts`**: Strict TypeScript interfaces reflecting FastAPI request and response models (1:1 with Pydantic models: `User`, `Account`, `AccountWithMembership`, `Transaction`, `LedgerEntry`, `AccountStatement`, `AdminStats`, `AdminUser`, `GlobalOverview`, `AuditEvent`, and request schemas).
+  - **`api/`**: Centralized HTTP client layer (`client.ts`) and modular service wrappers (`auth.ts`, `accounts.ts`, `transactions.ts`, `admin.ts`). Enforces `credentials: "include"`, standardizes error handling (401, 403, 404, 409, 422, 429), and sets `Idempotency-Key` headers on mutating financial requests.
   - **`context/` & `hooks/`**: `AuthContext` and `useAuth` provide global user session state. Automatically restores sessions on initial mount via `GET /auth/me`. Does not store credentials or tokens in browser storage (`localStorage` / `sessionStorage`).
-  - **`components/`**: Reusable presentation components: `Navbar`, `ProtectedRoute`, `RoleBadge`, `StatusBadge`, `CurrencyAmount` (paise to INR formatting with tabular numerals), `Alert`, and `Modal`.
+  - **`components/`**: Presentation components:
+    - `Navbar`: Dynamic navigation bar with brand, user identity, role badge, and role-specific shortcuts ("Admin Console", "Auditor Console").
+    - `Sidebar`: Tabbed navigation with live ledger status indicator.
+    - `ProtectedRoute`: Guards authenticated routes and redirects unauthenticated users to `/login`.
+    - `OnboardingWelcome`: Dedicated first-time user welcome screen with SVG vault illustration, feature highlights, and account opening CTA.
+    - `AccountOpeningModal`: Interactive modal with live debit card preview, currency selector, and optional ₹10,000 demo initial deposit.
+    - `QuickActionModals`: Two-step modal workflows for Deposit, Withdrawal, and Peer-to-Peer Transfer with preset amount pills and double-entry confirmation reviews.
+    - `RecentTransactionsTable`: Filterable, searchable, paginated ledger activity table with double-entry inspector modal.
+    - `StatementsViewer`: Official chronological account statement viewer with printable layout and zero-sum balance displays.
+    - `ProfileSettingsView`: Security settings display confirming HttpOnly session metadata and cryptographic parameters.
+    - `Toast`: Global success notification toast.
+    - `RoleBadge`, `StatusBadge`, `CurrencyAmount`, `Alert`, and `Modal`.
   - **`pages/`**:
-    - `LoginPage`: Email/password form with quick demo credential buttons for assessment evaluation (enabled conditionally in development mode or when `VITE_ENABLE_DEMO_CREDENTIALS="true"`).
+    - `LoginPage`: Email/password form with quick demo credential buttons for assessment evaluation.
     - `RegisterPage`: Full name, email, password verification with automated post-registration login.
-    - `DashboardPage`: Portfolio overview, aggregate balance calculation across accessible accounts, and account summary cards.
-    - `AccountDetailPage`: In-depth account balance, deposit modal, withdrawal modal, peer-to-peer transfer modal, and chronological double-entry statement history with transaction ledger inspection.
-    - `AdminAccountsPage`: Administrative account console for `ADMIN` users backed by `GET /admin/accounts` to oversee all customer accounts across the system, provision new accounts, and transition account lifecycle status (`ACTIVE`, `FROZEN`, `CLOSED`).
+    - `DashboardPage`: Command center for HOLDER users displaying 4 financial summary cards, quick actions toolbar, account inventory cards, and recent transactions. Dynamically renders `AuditorDashboardPage` if the authenticated user has the global `AUDITOR` role.
+    - `AccountDetailPage`: In-depth account view with balance, operation modals, and chronological statement history.
+    - `AdminAccountsPage`: Administrative management console for `ADMIN` users backed by `/admin/accounts`, `/admin/stats`, `/admin/users`, and `/admin/memberships` with three tabs: Accounts Registry (with Status change modal), User Directory (with Membership Assignment modal), and Audit Trail Monitoring.
+    - `AuditorDashboardPage`: Regulatory oversight console for `AUDITOR` users backed by `/audit/overview`, `/audit/accounts`, `/audit/transactions`, and `/audit/logs`. Features a prominent Read-Only Safety Banner, global financial overview metrics, and read-only journal inspection. All financial mutation buttons and operational controls are strictly omitted.
     - `NotFoundPage`: 404 fallback page.
   - **`utils/currency.ts`**: Minor-unit conversion (`parseRupeesToPaise`) and currency formatting (`formatPaise`).
-    - *Frontend vs. Backend Precision Contract*: The backend database stores monetary amounts using PostgreSQL signed 64-bit `BIGINT` (`MAX_PAISE_AMOUNT = 9,223,372,036,854,775,807n`, $2^{63} - 1$). The frontend uses JavaScript's `number` type for amounts, which is exact only up to `Number.MAX_SAFE_INTEGER` (`9,007,199,254,740,991n`, $2^{53} - 1$, representing ₹90,071,992,547,409.91). To prevent silent precision loss (where values above $2^{53} - 1$ round to adjacent even floats), `parseRupeesToPaise` strictly rejects inputs exceeding `FRONTEND_MAX_SAFE_PAISE` (returning `0`). Furthermore, `formatPaise` uses exact integer arithmetic (`BigInt`) to prevent float-division rounding errors on large safe-integer values.
+    - *Frontend vs. Backend Precision Contract*: The backend database stores monetary amounts using PostgreSQL signed 64-bit `BIGINT` (`MAX_PAISE_AMOUNT = 9,223,372,036,854,775,807n`, $2^{63} - 1$). The frontend uses JavaScript's `number` type for amounts, which is exact only up to `Number.MAX_SAFE_INTEGER` (`9,007,199,254,740,991n`, $2^{53} - 1$, representing ₹90,071,992,547,409.91). To prevent silent precision loss, `parseRupeesToPaise` strictly rejects inputs exceeding `FRONTEND_MAX_SAFE_PAISE` (returning `0`). Furthermore, `formatPaise` uses exact integer arithmetic (`BigInt`) to prevent float-division rounding errors on large safe-integer values.
 - **Idempotency Strategy:**
   - Client generates a UUID (`crypto.randomUUID()`) when opening a financial operation modal.
   - Preserves the same idempotency key across retries if a request fails due to network glitch or transient errors, ensuring the server replays safely rather than attempting double-execution.
@@ -144,12 +226,12 @@ The LedgerLine user interface is built as a single-page application integrating 
 
 The following architectural and security capabilities are distinguished from the core financial engine and represent scheduled future engineering tasks:
 
-1. **Database-Enforced Immutability for Posted Ledger Entries:**
-   Database-enforced append-only behavior is not implemented yet. While `ON DELETE RESTRICT` protects referenced parent accounts and transactions from deletion, it does not prevent direct `UPDATE` or `DELETE` operations on ledger entries themselves. Enforcing true append-only behavior at the database layer (via PostgreSQL role permission revocation or a `BEFORE UPDATE OR DELETE` trigger) remains a future engineering requirement.
-2. **Database Trigger for Automatic `updated_at` Refresh:**
-   Server-side PostgreSQL trigger (`BEFORE UPDATE ... NEW.updated_at = clock_timestamp()`) to guarantee timestamp refresh on raw SQL updates outside the SQLAlchemy ORM unit-of-work.
+1. **Database-Enforced Immutability for Posted Ledger Entries (Completed):**
+   - Implemented in migration `c18f3a8b9e10`, triggers `trg_ledger_entries_immutability` / `trg_ledger_entries_truncate`, and dedicated least-privilege role `ledgerline_app`. Direct SQL UPDATE, DELETE, and TRUNCATE are physically blocked at the PostgreSQL engine level.
+2. **Database Trigger for Automatic `updated_at` Refresh (Completed):**
+   - Implemented in migration `d4a72e81bc34` via `update_updated_at_column()` on `accounts`, `users`, and `transactions`. Guarantees server-side timestamp updates on direct SQL, preserves `created_at`, overrides client forgery, and prevents spurious bumps on no-op updates.
 3. **PostgreSQL Row-Level Security (RLS):**
-   Engine-level RLS policies if required by the eventual multi-tenant threat model beyond application-level authorization in `AccountMembership` and `authorization_service.py`.
+   - Engine-level RLS policies if required by the eventual multi-tenant threat model beyond application-level authorization in `AccountMembership` and `authorization_service.py`.
 
 ---
 *For a complete chronological log of all AI-assisted tasks, prompt texts, and audit results, see [`PROMPTS.md`](../PROMPTS.md).*

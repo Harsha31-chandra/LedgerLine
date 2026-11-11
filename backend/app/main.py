@@ -14,6 +14,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from backend.app.api.accounts import router as accounts_router
 from backend.app.api.admin import router as admin_router
+from backend.app.api.audit import router as audit_router
 from backend.app.api.auth import router as auth_router
 from backend.app.api.transactions import router as transactions_router
 from backend.app.config import settings
@@ -54,6 +55,7 @@ app.include_router(auth_router)
 app.include_router(accounts_router)
 app.include_router(transactions_router)
 app.include_router(admin_router)
+app.include_router(audit_router)
 
 
 @app.get("/health", tags=["ops"])

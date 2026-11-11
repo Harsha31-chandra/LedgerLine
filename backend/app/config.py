@@ -15,9 +15,16 @@ class Settings(BaseSettings):
     """Typed application settings loaded from environment variables."""
 
     # Database
-    database_url: str = "postgresql://ledgerline:ledgerline_dev@localhost:5432/ledgerline"
-    test_database_url: str = "postgresql://ledgerline:ledgerline_dev@localhost:5432/ledgerline_test"
+    app_database_url: str = "postgresql://ledgerline_app:ledgerline_app_dev@localhost:5432/ledgerline"
+    database_url: str = "postgresql://ledgerline_app:ledgerline_app_dev@localhost:5432/ledgerline"
+    test_database_url: str = "postgresql://ledgerline_migrator:ledgerline_migrator_dev@localhost:5432/ledgerline_test"
+    app_test_database_url: str = "postgresql://ledgerline_app:ledgerline_app_dev@localhost:5432/ledgerline_test"
     migration_database_url: str | None = None
+
+    # Production database allowlists (fail closed: required in production, ignored in local/test)
+    db_allowed_hosts: str = ""
+    db_allowed_databases: str = ""
+    db_allowed_ports: str = "5432"
 
     # Session security
     session_secret: str = "change-me-to-a-random-string"
@@ -30,6 +37,9 @@ class Settings(BaseSettings):
 
     # Application environment
     app_env: str = "development"
+
+    # Demo funds configuration (sample initial deposits for local evaluation)
+    enable_demo_funds: bool = True
 
     # CORS & CSRF — comma-separated explicitly trusted origins
     cors_origins: str = "http://localhost:5173,http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000"
@@ -66,7 +76,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
-        """Fail closed if production environment attempts to run with insecure default secrets."""
+        """Fail closed if production environment attempts to run with insecure default secrets or missing allowlists."""
+        from backend.app.core.database_url import is_test_database_name
+
         is_production = (self.app_env or "").strip().lower() in ("production", "prod")
         insecure_placeholders = {
             "change-me-to-a-random-string",
@@ -81,12 +93,48 @@ class Settings(BaseSettings):
                     "Insecure production configuration: 'session_secret' must be a secure random secret "
                     "of at least 32 characters in production environments. Known placeholder values are rejected."
                 )
+            if not self.db_allowed_hosts_list:
+                raise ValueError(
+                    "Insecure production configuration: 'db_allowed_hosts' must be explicitly configured "
+                    "with allowed database host(s) in production environments. Unrestricted database host access is prohibited."
+                )
+            if not self.db_allowed_databases_list:
+                raise ValueError(
+                    "Insecure production configuration: 'db_allowed_databases' must be explicitly configured "
+                    "with allowed database name(s) in production environments. Unrestricted database access is prohibited."
+                )
+            for db_name in self.db_allowed_databases_list:
+                if is_test_database_name(db_name):
+                    raise ValueError(
+                        f"Insecure production configuration: 'db_allowed_databases' contains test database '{db_name}'. "
+                        "Test databases are strictly prohibited in production environments."
+                    )
         return self
 
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse comma-separated CORS origins into a list."""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def db_allowed_hosts_list(self) -> list[str]:
+        """Parse comma-separated allowed database hosts."""
+        return [h.strip().lower() for h in self.db_allowed_hosts.split(",") if h.strip()]
+
+    @property
+    def db_allowed_databases_list(self) -> list[str]:
+        """Parse comma-separated allowed database names."""
+        return [d.strip().lower() for d in self.db_allowed_databases.split(",") if d.strip()]
+
+    @property
+    def db_allowed_ports_list(self) -> list[int]:
+        """Parse comma-separated allowed database ports."""
+        ports: list[int] = []
+        for p in self.db_allowed_ports.split(","):
+            p_clean = p.strip()
+            if p_clean.isdigit():
+                ports.append(int(p_clean))
+        return ports or [5432]
 
     model_config = {
         "env_file": ".env",

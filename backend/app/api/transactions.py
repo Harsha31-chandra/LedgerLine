@@ -232,6 +232,62 @@ def transfer(
 
 
 @router.get(
+    "/transactions",
+    response_model=list[TransactionResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List transactions accessible to the authenticated user",
+)
+def list_transactions(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[DbSession, Depends(get_db)],
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Transaction]:
+    """Retrieve transactions involving accounts accessible to the authenticated user."""
+    from backend.app.models.account_membership import AccountMembership
+    from backend.app.models.ledger_entry import LedgerEntry
+    from backend.app.models.user import UserRole
+    from sqlalchemy import select
+
+    if not current_user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive")
+
+    # Admins and Auditors can view all transactions
+    if current_user.role in (UserRole.ADMIN, UserRole.AUDITOR):
+        stmt = (
+            select(Transaction)
+            .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+            .limit(min(limit, 100))
+            .offset(max(offset, 0))
+        )
+        return list(db.scalars(stmt).all())
+
+    # Holders are scoped to transactions involving their accessible accounts
+    user_account_ids = db.scalars(
+        select(AccountMembership.account_id).where(AccountMembership.user_id == current_user.id)
+    ).all()
+
+    if not user_account_ids:
+        return []
+
+    subquery = (
+        select(LedgerEntry.transaction_id)
+        .where(LedgerEntry.account_id.in_(user_account_ids))
+        .distinct()
+        .subquery()
+    )
+
+    stmt = (
+        select(Transaction)
+        .where(Transaction.id.in_(select(subquery.c.transaction_id)))
+        .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+        .limit(min(limit, 100))
+        .offset(max(offset, 0))
+    )
+    return list(db.scalars(stmt).all())
+
+
+@router.get(
     "/transactions/{transaction_id}",
     response_model=TransactionResponse,
     status_code=status.HTTP_200_OK,

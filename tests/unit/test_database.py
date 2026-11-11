@@ -14,8 +14,11 @@ from backend.app.core.database_url import (
     APPROVED_LOCAL_HOSTS,
     APPROVED_POSTGRES_DRIVERS,
     APPROVED_POSTGRES_PORT,
+    APPROVED_RUNTIME_ROLE,
+    PROHIBITED_RUNTIME_ROLES,
     assert_test_database_url_safety,
     validate_migration_database_url,
+    validate_runtime_database_url,
 )
 
 
@@ -516,11 +519,312 @@ def test_test_engine_fixture_sqlite_in_memory_lifecycle(monkeypatch):
 
 
 def test_test_engine_fixture_connects_to_live_postgres(test_engine):
-    """Verify test_engine fixture connects cleanly to the live ledgerline_test database in Docker."""
+    """Verify test_engine fixture connects cleanly as migration role ledgerline_migrator."""
     from sqlalchemy import text
 
     with test_engine.connect() as conn:
         db_name = conn.execute(text("SELECT current_database()")).scalar()
         assert db_name == "ledgerline_test"
         current_user = conn.execute(text("SELECT current_user")).scalar()
-        assert current_user == "ledgerline"
+        assert current_user == "ledgerline_migrator"
+
+
+def test_app_test_engine_fixture_connects_to_live_postgres(app_test_engine):
+    """Verify app_test_engine fixture connects cleanly as runtime role ledgerline_app."""
+    from sqlalchemy import text
+
+    with app_test_engine.connect() as conn:
+        db_name = conn.execute(text("SELECT current_database()")).scalar()
+        assert db_name == "ledgerline_test"
+        current_user = conn.execute(text("SELECT current_user")).scalar()
+        assert current_user == "ledgerline_app"
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED RUNTIME DATABASE URL TESTS (Task A & Task D)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_url_accepts_valid_ledgerline_app():
+    """Verify runtime URL validator accepts valid ledgerline_app connections."""
+    for host_spec in ["localhost", "127.0.0.1", "[::1]"]:
+        url1 = f"postgresql://ledgerline_app:ledgerline_app_dev@{host_spec}:5432/ledgerline"
+        assert validate_runtime_database_url(url1) == url1
+
+        url2 = f"postgresql+psycopg2://ledgerline_app:ledgerline_app_dev@{host_spec}:5432/ledgerline"
+        assert validate_runtime_database_url(url2) == url2
+
+        url_test = f"postgresql://ledgerline_app:ledgerline_app_dev@{host_spec}:5432/ledgerline_test"
+        assert validate_runtime_database_url(url_test) == url_test
+
+
+def test_runtime_url_accepts_sqlite_in_memory_override():
+    """Verify runtime URL validator accepts SQLite in-memory for test engine overrides."""
+    assert validate_runtime_database_url("sqlite:///:memory:") == "sqlite:///:memory:"
+
+
+def test_runtime_url_rejects_file_based_sqlite():
+    """Verify runtime URL validator rejects file-based SQLite connections."""
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*File-based SQLite"):
+        validate_runtime_database_url("sqlite:///app.db")
+
+
+def test_runtime_url_rejects_missing_or_empty():
+    """Verify runtime URL validator fails closed on missing, empty, or whitespace URLs."""
+    for empty_val in [None, "", "   ", "\t\n"]:
+        with pytest.raises(ValueError, match="Application runtime database URL is empty"):
+            validate_runtime_database_url(empty_val)
+
+
+def test_runtime_url_rejects_malformed_urls():
+    """Verify runtime URL validator fails closed on malformed connection strings."""
+    with pytest.raises(ValueError, match="Invalid or malformed database URL"):
+        validate_runtime_database_url("not_a_valid_url :///")
+
+
+def test_runtime_url_rejects_remote_hosts():
+    """Verify runtime URL validator rejects remote hosts."""
+    remote_url = "postgresql://ledgerline_app:secret@192.168.1.50:5432/ledgerline"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*not an approved local host"):
+        validate_runtime_database_url(remote_url)
+
+
+def test_runtime_url_rejects_non_standard_ports():
+    """Verify runtime URL validator rejects non-standard PostgreSQL ports."""
+    bad_port_url = "postgresql://ledgerline_app:secret@localhost:5433/ledgerline"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*must use port 5432"):
+        validate_runtime_database_url(bad_port_url)
+
+
+def test_runtime_url_rejects_unauthorized_databases():
+    """Verify runtime URL validator rejects unauthorized target databases."""
+    bad_db_url = "postgresql://ledgerline_app:secret@localhost:5432/other_db"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*not an authorized runtime database"):
+        validate_runtime_database_url(bad_db_url)
+
+
+def test_runtime_url_rejects_privileged_roles():
+    """Verify runtime URL validator strictly rejects privileged and superuser roles."""
+    for privileged_role in ["ledgerline", "ledgerline_migrator", "postgres", "root", "admin"]:
+        bad_role_url = f"postgresql://{privileged_role}:secret@localhost:5432/ledgerline"
+        with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*attempted to use privileged or unauthorized role"):
+            validate_runtime_database_url(bad_role_url)
+
+
+def test_runtime_url_rejects_arbitrary_unapproved_roles():
+    """Verify runtime URL validator rejects any user role other than ledgerline_app."""
+    unapproved_url = "postgresql://attacker_user:secret@localhost:5432/ledgerline"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*must use dedicated role 'ledgerline_app'"):
+        validate_runtime_database_url(unapproved_url)
+
+
+def test_create_app_engine_fails_closed_when_runtime_url_missing(monkeypatch):
+    """Verify create_app_engine fails closed when app_database_url is missing or empty."""
+    monkeypatch.setattr(settings, "app_database_url", "")
+    with pytest.raises(ValueError, match="Application runtime database URL is empty"):
+        create_app_engine()
+
+
+def test_create_app_engine_fails_closed_on_privileged_role(monkeypatch):
+    """Verify create_app_engine fails closed when runtime URL uses privileged role."""
+    monkeypatch.setattr(
+        settings,
+        "app_database_url",
+        "postgresql://ledgerline:secret@localhost:5432/ledgerline",
+    )
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*attempted to use privileged or unauthorized role"):
+        create_app_engine()
+
+
+def test_create_app_engine_no_unsafe_fallback_to_privileged_database_url(monkeypatch):
+    """Verify create_app_engine never silently falls back to privileged database_url."""
+    monkeypatch.setattr(settings, "app_database_url", None)
+    monkeypatch.setattr(
+        settings,
+        "database_url",
+        "postgresql://ledgerline:secret@localhost:5432/ledgerline",
+    )
+    with pytest.raises(ValueError, match="Application runtime database URL is empty"):
+        create_app_engine()
+
+
+def test_migration_database_url_rejects_runtime_role_ledgerline_app():
+    """Verify validate_migration_database_url rejects runtime role ledgerline_app."""
+    app_migration_url = "postgresql://ledgerline_app:secret@localhost:5432/ledgerline_test"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*cannot use runtime application role 'ledgerline_app'"):
+        validate_migration_database_url(app_migration_url)
+
+
+# ---------------------------------------------------------------------------
+# PRODUCTION ENVIRONMENT POLICY & ALLOWLIST TESTS (PROMPT-047D Task A & Task C)
+# ---------------------------------------------------------------------------
+
+
+def test_production_policy_rejects_missing_hosts_allowlist():
+    """Verify production runtime URL validation rejects when host allowlist is missing or empty."""
+    url = "postgresql://ledgerline_app:secret@db.internal.example.com:5432/ledgerline_prod"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*Production database host allowlist is empty"):
+        validate_runtime_database_url(
+            url,
+            app_env="production",
+            allowed_hosts=[],
+            allowed_databases=["ledgerline_prod"],
+        )
+
+
+def test_production_policy_rejects_missing_databases_allowlist():
+    """Verify production runtime URL validation rejects when database allowlist is missing or empty."""
+    url = "postgresql://ledgerline_app:secret@db.internal.example.com:5432/ledgerline_prod"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*Production database allowlist is empty"):
+        validate_runtime_database_url(
+            url,
+            app_env="production",
+            allowed_hosts=["db.internal.example.com"],
+            allowed_databases=[],
+        )
+
+
+def test_production_policy_rejects_unallowlisted_host():
+    """Verify production runtime URL validation rejects hosts not in explicit allowlist."""
+    url = "postgresql://ledgerline_app:secret@unauthorized-db.example.com:5432/ledgerline_prod"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*not in the explicit production host allowlist"):
+        validate_runtime_database_url(
+            url,
+            app_env="production",
+            allowed_hosts=["db.internal.example.com"],
+            allowed_databases=["ledgerline_prod"],
+        )
+
+
+def test_production_policy_rejects_unallowlisted_database():
+    """Verify production runtime URL validation rejects databases not in explicit allowlist."""
+    url = "postgresql://ledgerline_app:secret@db.internal.example.com:5432/unauthorized_db"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*not in the explicit production database allowlist"):
+        validate_runtime_database_url(
+            url,
+            app_env="production",
+            allowed_hosts=["db.internal.example.com"],
+            allowed_databases=["ledgerline_prod"],
+        )
+
+
+def test_production_policy_rejects_privileged_and_migration_roles():
+    """Verify production runtime URL validation rejects bootstrap, migration, and superuser roles."""
+    for bad_role in ["ledgerline", "ledgerline_migrator", "postgres", "root", "admin"]:
+        url = f"postgresql://{bad_role}:secret@db.internal.example.com:5432/ledgerline_prod"
+        with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*attempted to use privileged or unauthorized role"):
+            validate_runtime_database_url(
+                url,
+                app_env="production",
+                allowed_hosts=["db.internal.example.com"],
+                allowed_databases=["ledgerline_prod"],
+            )
+
+
+def test_production_policy_rejects_test_database_targets():
+    """Verify production runtime URL validation rejects test databases under all naming variations."""
+    for test_db in ["ledgerline_test", "customer_test", "test_ledgerline", "staging_test_db"]:
+        url = f"postgresql://ledgerline_app:secret@db.internal.example.com:5432/{test_db}"
+        with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*Test databases are strictly prohibited in production"):
+            validate_runtime_database_url(
+                url,
+                app_env="production",
+                allowed_hosts=["db.internal.example.com"],
+                allowed_databases=[test_db, "ledgerline_prod"],
+            )
+
+
+def test_production_policy_rejects_sqlite():
+    """Verify production runtime URL validation strictly rejects SQLite even if in-memory."""
+    for sqlite_url in ["sqlite:///:memory:", "sqlite:///prod.db"]:
+        with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*SQLite database.*strictly prohibited in production"):
+            validate_runtime_database_url(
+                sqlite_url,
+                app_env="production",
+                allowed_hosts=["db.internal.example.com"],
+                allowed_databases=["ledgerline_prod"],
+            )
+
+
+def test_production_policy_accepts_explicitly_approved_configuration():
+    """Verify production runtime URL validation accepts properly configured production connection."""
+    url = "postgresql://ledgerline_app:ProductionPassword123!@db.internal.example.com:5432/ledgerline_prod"
+    validated = validate_runtime_database_url(
+        url,
+        app_env="production",
+        allowed_hosts=["db.internal.example.com"],
+        allowed_databases=["ledgerline_prod"],
+    )
+    assert validated == url
+
+
+def test_settings_production_fails_closed_on_missing_allowlists():
+    """Verify Settings model validator fails closed in production when allowlists are omitted."""
+    from backend.app.config import Settings
+
+    valid_secret = "a" * 32
+
+    # Missing hosts allowlist
+    with pytest.raises(ValueError, match="Insecure production configuration.*db_allowed_hosts"):
+        Settings(
+            app_env="production",
+            session_secret=valid_secret,
+            db_allowed_hosts="",
+            db_allowed_databases="ledgerline_prod",
+        )
+
+    # Missing databases allowlist
+    with pytest.raises(ValueError, match="Insecure production configuration.*db_allowed_databases"):
+        Settings(
+            app_env="production",
+            session_secret=valid_secret,
+            db_allowed_hosts="db.internal.example.com",
+            db_allowed_databases="",
+        )
+
+
+def test_settings_production_fails_closed_when_test_db_in_allowlist():
+    """Verify Settings model validator rejects test databases in production db_allowed_databases."""
+    from backend.app.config import Settings
+
+    valid_secret = "a" * 32
+    with pytest.raises(ValueError, match="Insecure production configuration.*contains test database"):
+        Settings(
+            app_env="production",
+            session_secret=valid_secret,
+            db_allowed_hosts="db.internal.example.com",
+            db_allowed_databases="ledgerline_test",
+        )
+
+
+def test_production_migration_database_url_validation():
+    """Verify validate_migration_database_url enforces production allowlists and role separation."""
+    # Production migration URL accepts ledgerline_migrator with approved host and database
+    prod_mig_url = "postgresql://ledgerline_migrator:secret@db.internal.example.com:5432/ledgerline_prod"
+    validated = validate_migration_database_url(
+        prod_mig_url,
+        app_env="production",
+        allowed_hosts=["db.internal.example.com"],
+        allowed_databases=["ledgerline_prod"],
+    )
+    assert validated == prod_mig_url
+
+    # Rejects ledgerline_app for migrations in production
+    app_mig_url = "postgresql://ledgerline_app:secret@db.internal.example.com:5432/ledgerline_prod"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*cannot use runtime application role 'ledgerline_app'"):
+        validate_migration_database_url(
+            app_mig_url,
+            app_env="production",
+            allowed_hosts=["db.internal.example.com"],
+            allowed_databases=["ledgerline_prod"],
+        )
+
+    # Rejects test database in production migrations
+    test_mig_url = "postgresql://ledgerline_migrator:secret@db.internal.example.com:5432/ledgerline_test"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*Test databases are strictly prohibited in production"):
+        validate_migration_database_url(
+            test_mig_url,
+            app_env="production",
+            allowed_hosts=["db.internal.example.com"],
+            allowed_databases=["ledgerline_test", "ledgerline_prod"],
+        )

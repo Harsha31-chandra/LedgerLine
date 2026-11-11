@@ -37,7 +37,12 @@ export function Navbar() {
               </Link>
               {user.role === 'ADMIN' && (
                 <Link to="/admin/accounts" className="nav-link">
-                  Admin Panel
+                  Admin Console
+                </Link>
+              )}
+              {user.role === 'AUDITOR' && (
+                <Link to="/audit" className="nav-link">
+                  Auditor Console
                 </Link>
               )}
 

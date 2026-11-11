@@ -106,7 +106,8 @@ describe('Dashboard & Account Listing', () => {
     )
 
     await waitFor(() => {
-      expect(screen.getByText('No Accounts Found')).toBeInTheDocument()
+      expect(screen.getByText(/Your financial journey starts here/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Open Your First Account/i })).toBeInTheDocument()
     })
   })
 

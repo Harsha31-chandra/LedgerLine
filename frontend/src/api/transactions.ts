@@ -46,6 +46,15 @@ export async function getTransaction(transactionId: string): Promise<Transaction
   })
 }
 
+export async function listTransactions(
+  limit: number = 50,
+  offset: number = 0,
+): Promise<Transaction[]> {
+  return apiClient<Transaction[]>(`/transactions?limit=${limit}&offset=${offset}`, {
+    method: 'GET',
+  })
+}
+
 export async function getAccountStatement(accountId: string): Promise<AccountStatement> {
   return apiClient<AccountStatement>(`/accounts/${accountId}/statement`, {
     method: 'GET',

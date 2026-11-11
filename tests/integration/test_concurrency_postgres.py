@@ -15,7 +15,7 @@ import threading
 import uuid
 
 import pytest
-from sqlalchemy import Engine, delete, or_, select
+from sqlalchemy import Engine, delete, or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.core.exceptions import (
@@ -54,13 +54,29 @@ def _cleanup_database(conn, created_user_ids=None, created_account_ids=None):
     tx_ids = [row[0] for row in res.fetchall()]
 
     # 2. Delete ledger entries referencing these transactions or accounts
+    # The test-admin owner connection (ledgerline) has table-owner DDL privileges to
+    # temporarily disable the immutability trigger for isolated test fixture cleanup.
+    # The runtime application role (ledgerline_app) cannot do this because it is not the table owner.
     le_conditions = []
     if tx_ids:
         le_conditions.append(LedgerEntry.transaction_id.in_(tx_ids))
     if created_account_ids:
         le_conditions.append(LedgerEntry.account_id.in_(created_account_ids))
     if le_conditions:
-        conn.execute(delete(LedgerEntry).where(or_(*le_conditions)))
+        is_postgres = (conn.dialect.name == "postgresql")
+        trigger_disabled = False
+        if is_postgres:
+            has_trigger = conn.execute(
+                text("SELECT 1 FROM pg_trigger WHERE tgname = 'trg_ledger_entries_immutability'")
+            ).scalar() is not None
+            if has_trigger:
+                conn.execute(text("ALTER TABLE ledger_entries DISABLE TRIGGER trg_ledger_entries_immutability;"))
+                trigger_disabled = True
+        try:
+            conn.execute(delete(LedgerEntry).where(or_(*le_conditions)))
+        finally:
+            if trigger_disabled:
+                conn.execute(text("ALTER TABLE ledger_entries ENABLE TRIGGER trg_ledger_entries_immutability;"))
 
     # 3. Delete transactions
     if tx_ids:

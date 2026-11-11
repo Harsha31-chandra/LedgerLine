@@ -29,6 +29,25 @@ class AccountCreateRequest(AccountBase):
     )
 
 
+class AccountOnboardingRequest(AccountBase):
+    """Request schema for self-service account onboarding with optional demo opening deposit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_type: str = Field(
+        default="Savings Account",
+        min_length=1,
+        max_length=50,
+        description="User-selected account type label (e.g. 'Savings Account', 'Current Account').",
+    )
+    initial_deposit_paise: int = Field(
+        default=0,
+        ge=0,
+        le=1_000_000,
+        description="Optional initial demo opening deposit in minor integer paise (max ₹10,000 / 1,000,000 paise).",
+    )
+
+
 class AccountUpdateRequest(BaseModel):
     """Request schema for updating account metadata (Owner-only)."""
 

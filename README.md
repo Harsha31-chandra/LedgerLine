@@ -99,18 +99,21 @@ npm run dev
 5. One idempotency key maps to at most one financial effect.
 6. Balance snapshots equal the balance derived from posted ledger entries (`reconcile_account_balance` returns `is_reconciled=True`).
 
-## Database Environment Isolation
+## Database Environment Isolation & Three-Tier Role Separation
 
-LedgerLine strictly isolates development, testing, and migration database environments:
+LedgerLine strictly isolates development, testing, and migration database environments and enforces three-tier role least privilege:
 
-- **`DATABASE_URL`**: Used exclusively for application development runtime (`ledgerline`). Never used for tests or migration commands.
-- **`TEST_DATABASE_URL`**: Used exclusively by Pytest for automated test execution (`ledgerline_test` on `localhost:5432`). Programmatically rejects connections targeting `ledgerline`.
-- **`MIGRATION_DATABASE_URL`**: Required explicitly for all Alembic commands. Never falls back to `DATABASE_URL` or application settings. During initial development, migrations must target `ledgerline_test` on `localhost:5432`. No migration command can silently execute against the development database.
+- **Bootstrap Administrator (`ledgerline`)**: Used exclusively for initial PostgreSQL container provisioning and database creation. Never used for application runtime or routine migrations.
+- **Migration & Schema-Owner Role (`ledgerline_migrator`)**: Non-superuser role (`NOSUPERUSER`) that owns the `public` schema and all domain tables/functions. Used by `MIGRATION_DATABASE_URL` for routine Alembic migrations and by `TEST_DATABASE_URL` for test fixture setup.
+- **Application Runtime Role (`ledgerline_app`)**: Non-superuser, non-owner role (`NOSUPERUSER`) used by `APP_DATABASE_URL` and `DATABASE_URL`. Strictly granted `SELECT, INSERT` on `ledger_entries` (no `UPDATE`, `DELETE`, `TRUNCATE`). Does not own tables and cannot disable triggers.
+- **Environment-Aware Fail-Closed Validation**: `validate_runtime_database_url` verifies connection strings before engine creation. Prohibits privileged roles (`ledgerline`, `ledgerline_migrator`, `postgres`, `root`, `admin`) and requires `ledgerline_app`. In local/test environments, restricts connections to loopback hosts (`localhost`, `127.0.0.1`, `::1`), port 5432, and databases `ledgerline`/`ledgerline_test`. In production (`APP_ENV=production`), requires explicit host and database allowlists (`DB_ALLOWED_HOSTS`, `DB_ALLOWED_DATABASES`), rejects missing allowlists, and strictly blocks test database targets (`*_test`). Engine creation will never silently fall back to privileged migration settings.
 
 ## Database Schema & Migration Status
 
 - **Baseline Migration:** `7717a26bd3d3_initial_schema` ([`backend/migrations/versions/7717a26bd3d3_initial_schema.py`](backend/migrations/versions/7717a26bd3d3_initial_schema.py)).
 - **Clearing Debit Balance Migration:** `27022f5fc965_allow_clearing_debit_balance` ([`backend/migrations/versions/27022f5fc965_allow_clearing_debit_balance.py`](backend/migrations/versions/27022f5fc965_allow_clearing_debit_balance.py)). Resets `SYSTEM_CLEARING` balance snapshot to 0 and updates `ck_accounts_balance_non_negative` check constraint to `CHECK (balance >= 0 OR account_number = 'SYSTEM_CLEARING')`.
+- **Ledger Immutability Migration:** `c18f3a8b9e10_enforce_ledger_entries_immutability` ([`backend/migrations/versions/c18f3a8b9e10_enforce_ledger_entries_immutability.py`](backend/migrations/versions/c18f3a8b9e10_enforce_ledger_entries_immutability.py)). Enforces database-level append-only protection on `ledger_entries` via PL/pgSQL triggers (`trg_ledger_entries_immutability`, `trg_ledger_entries_truncate`), revoking UPDATE/DELETE/TRUNCATE from `ledgerline_app`.
+- **Timestamp Consistency Migration:** `d4a72e81bc34_enforce_database_updated_at_triggers` ([`backend/migrations/versions/d4a72e81bc34_enforce_database_updated_at_triggers.py`](backend/migrations/versions/d4a72e81bc34_enforce_database_updated_at_triggers.py)). Attaches `update_updated_at_column()` triggers to mutable tables (`accounts`, `users`, `transactions`), guaranteeing fresh server-side timestamps on direct SQL, preserving `created_at`, overriding client forgery, and suppressing spurious bumps on no-op updates.
 - **Target Database:** Verified and applied exclusively to the isolated test database `ledgerline_test`.
 - **Schema Contents:** 8 application domain tables (`users`, `sessions`, `accounts`, `account_memberships`, `transactions`, `ledger_entries`, `idempotency_records`, `audit_events`), 58 columns, 8 foreign keys (`ondelete` safeguards: `RESTRICT` on `ledger_entries` protects referenced parent accounts/transactions from deletion, `SET NULL` on audit/transaction initiators, `CASCADE` on memberships/sessions/idempotency), 9 check constraints, 2 composite unique constraints, 18 indexes, and `alembic_version`.
 - **Schema Drift Check:** Verified clean via `python -m alembic -c backend\alembic.ini check` (`No new upgrade operations detected`).
@@ -167,11 +170,13 @@ Implemented across `backend/app/services/account_service.py`, `backend/app/servi
   - `POST /transactions/transfer`: Peer-to-peer transfer. Debits source customer account, credits destination customer account. Prohibits `SYSTEM_CLEARING` from being targeted or sourced (HTTP 400 `ClearingAccountTransferError`). Enforces distinct source and destination accounts.
   - `GET /transactions/{id}`: Detailed transaction retrieval with double-entry ledger lines. Requires active membership on at least one involved account (anti-IDOR 404 for non-members including `ADMIN` and `AUDITOR` without membership per PROMPT-030).
   - `GET /accounts/{id}/statement`: Chronological statement of posted ledger entries with transaction metadata.
-- **Double-Entry Invariants:**
+- **Double-Entry Invariants & Database Immutability:**
   - Every transaction generates balanced `DEBIT` and `CREDIT` entries where $\sum \text{Debits} == \sum \text{Credits}$.
   - System clearing account (`SYSTEM_CLEARING`, 0 opening balance) represents external rail claims/obligations, ensuring total money conservation across every operation: $\sum \text{Customer Balances} + \text{Clearing Balance} == 0$.
   - Customer accounts strictly enforce non-negative balances (`balance >= 0`); `SYSTEM_CLEARING` permits negative settlement balances.
   - Periodic reconciliation audits balance snapshots against posted ledger journals via `reconcile_account_balance` (`is_reconciled=True`).
+  - **PostgreSQL Database-Level Immutability:** Row-level `BEFORE UPDATE OR DELETE` trigger `trg_ledger_entries_immutability` and statement-level `BEFORE TRUNCATE` trigger `trg_ledger_entries_truncate` block all updates, deletions, and truncations on `ledger_entries` with SQLSTATE `20000`.
+  - **Role Separation & Least Privilege:** Dedicated runtime application role `ledgerline_app` (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`) has only `SELECT, INSERT` on `ledger_entries` (no `UPDATE`, `DELETE`, `TRUNCATE`) and does not own the table, physically preventing trigger tampering or privilege escalation. Routine Alembic migrations run under schema-owner role `ledgerline_migrator` via `MIGRATION_DATABASE_URL` without superuser privileges, while cluster bootstrap is confined to `ledgerline`.
 - **Concurrency & Idempotency:**
   - **Pessimistic Row-Level Locking:** Accounts are locked using `SELECT ... FOR UPDATE` with `execution_options(populate_existing=True)` in deterministic sorted UUID order (`min(id1, id2)` then `max(id1, id2)`), eliminating deadlocks and lost updates across concurrent workers.
   - **Balance Re-Verification:** Account balance and status are re-checked under the exclusive row lock, preventing overdrafts in concurrent races.
@@ -217,26 +222,62 @@ npm run build
 
 ## Remaining Engineering Considerations
 
-The following capabilities are deliberately distinguished from the core financial engine and represent upcoming engineering work:
-- Database-enforced immutability for posted ledger entries (currently, `ON DELETE RESTRICT` protects parent records from deletion, but does not prevent direct `UPDATE` or `DELETE` on ledger entries; database-enforced append-only behavior via role permissions or triggers remains a future requirement).
-- Server-side database triggers for automatic `updated_at` refresh on raw SQL updates outside the ORM.
-- Engine-level PostgreSQL row-level security (RLS), if required by the threat model.
+The following capability is distinguished from the core financial engine and represents upcoming engineering work:
+- Engine-level PostgreSQL row-level security (RLS), if required by the multi-tenant threat model.
 
 ## Running Tests
 
+### Security Test Suite
+Configured with 67 dedicated automated security tests in `tests/security/` covering BOLA/IDOR, global role barriers, AUDITOR read-only overrides, account membership hierarchy, mass assignment protection (`extra='forbid'`), session lifecycle, inactive user handling, recursive credential scrubbing, and route authorization matrices:
+```powershell
+pytest tests/security/ -v
+```
+*Result:* **67 passed in 6.36s** (0 warnings).
+
 ### Backend Test Suite
-Configured via `pytest.ini` with 247 automated unit, API, and PostgreSQL integration tests:
+Configured via `pytest.ini` with 387 automated unit, API, security, concurrency, and PostgreSQL immutability/timestamp integration tests:
 ```powershell
 pytest -q
 ```
-*Result:* **247 passed in 19.65s** (0 warnings).
+*Result:* **387 passed in 49.33s** (0 warnings, 0 failures).
+
+### PostgreSQL Integration Test Suite
+Dedicated multi-worker concurrency, database-level immutability triggers, and server-side timestamp consistency tests:
+```powershell
+pytest -v tests/integration/
+```
+*Result:* **34 passed in 14.08s** (0 warnings, 0 failures).
 
 ### Frontend Test Suite
-Configured via `vitest` with 22 automated unit and component integration tests:
+Configured via `vitest` with 61 automated unit and component integration tests:
 ```powershell
 npm --prefix frontend run test
 ```
-*Result:* **22 passed across 5 test files in 4.85s** (0 warnings).
+*Result:* **61 passed across 9 test files in 8.43s** (0 warnings, 0 failures).
+
+### Frontend Linter & Build Validation
+```powershell
+npm --prefix frontend run lint
+npm --prefix frontend run build
+```
+*Result:* **0 errors, 0 warnings across 45 files (oxlint in 139ms)**; **Clean production build in 337ms (tsc -b && vite build)**.
+
+## Five-Minute Hiring Challenge Demonstration Sequence
+
+This step-by-step walkthrough presents the complete system architecture, financial core, and multi-role security boundaries within 5 minutes:
+
+1. **Architecture & Philosophy (Minute 1):** Introduce LedgerLine's core purpose: moving money while mathematically proving conservation via append-only double-entry postings ($\sum \text{Debits} == \sum \text{Credits}$).
+2. **Holder Registration & Onboarding (Minute 2):** Navigate to `http://localhost:3000/register`. Register a fresh user. Demonstrate the dedicated First-Time Onboarding screen with the LedgerLine vault illustration.
+3. **Account Creation & Demo Credit (Minute 2.5):** Click `Open Your First Account`. Open `Primary Checking` with sample ₹10,000 opening credit. Show confirmed balance and live debit card preview.
+4. **Financial Operations & Real-Time Balance (Minute 3):** 
+   - Execute a ₹2,500 deposit (Balance updates to ₹12,500).
+   - Execute a ₹1,000 withdrawal (Balance updates to ₹11,500).
+   - Open a second account `Business Reserve` (with ₹0 initial balance).
+   - Transfer ₹1,500 from `Primary Checking` to `Business Reserve`.
+5. **Double-Entry Journal & Statements (Minute 3.5):** Open the `Statements` tab. Inspect the chronological ledger entries. Demonstrate zero-sum debit/credit balance proofs ($\Delta = 0$).
+6. **Admin Governance Console (Minute 4):** Sign out and log in as `admin@ledgerline.com` / `SecurePass123!`. Navigate to `Admin Console`. Show system metrics, accounts registry, user directory, and membership assignment modal.
+7. **Auditor Read-Only Enforcement (Minute 4.5):** Sign out and log in as `auditor@ledgerline.com` / `SecurePass123!`. Show the prominent `Read-Only Compliance Mode Active` banner, system-wide transaction journal, and demonstrate that mutation controls are completely omitted.
+8. **Security & Financial Integrity Conclusion (Minute 5):** Summarize database row locks (`SELECT FOR UPDATE`), immutable triggers, and zero-loss guarantees.
 
 ## Documentation & AI Usage Log
 
@@ -245,7 +286,110 @@ npm --prefix frontend run test
 
 ## API Documentation
 
-When the backend is running: http://localhost:8000/docs
+- **Docker Compose Gateway (Recommended):** [http://localhost:3000/docs](http://localhost:3000/docs) (Swagger UI) and [http://localhost:3000/redoc](http://localhost:3000/redoc) (ReDoc)
+- **Standalone Development Server (when running uvicorn on host):** [http://localhost:8000/docs](http://localhost:8000/docs)
+
+## Deployment & Container Orchestration
+
+LedgerLine provides a containerized multi-tier orchestration environment using Docker and Docker Compose (`docker-compose.yml`):
+- **Database (`db`)**: PostgreSQL 16.8 on Alpine with named persistent storage (`pgdata`), attached strictly to the internal `db-net` network with zero host port exposure in default/staging configuration.
+- **Backend API (`backend`)**: FastAPI ASGI application running under Uvicorn in a non-root container (`python:3.12-slim`), using the restricted `ledgerline_app` runtime role. Connected to `proxy-net` and `db-net`, trusting forwarded proxy headers exclusively from Nginx (`172.28.1.10`). Exposes port 8000 internally.
+- **Frontend SPA (`frontend`)**: Multi-stage production build (`node:22-alpine` builder, `nginx:stable-alpine` runner) with static IP `172.28.1.10` on `proxy-net`. Serves bundled client assets on port 3000 and reverse-proxies API routes directly to the backend. Has no access to `db-net`.
+- **Migration Runner (`migrator`)**: Isolated one-off container profile (`--profile ops`) on `db-net` connecting via the privileged schema-owner role `ledgerline_migrator`. Migrations are never executed automatically on application startup.
+- **Local Dev Database Access (`docker-compose.dev.yml`)**: An optional development override binding PostgreSQL strictly to local loopback (`127.0.0.1:5432`) for running host-level test suites.
+
+### Environment Configuration
+Copy `.env.example` to `.env` and configure appropriate secrets:
+- `SESSION_SECRET`: Cryptographically random string ($\ge 32$ characters in production/staging).
+- `APP_ENV`: `production` for containerized staging deployment (enforces fail-closed allowlists).
+- `DB_ALLOWED_HOSTS`: `db` (required when `APP_ENV=production`).
+- `DB_ALLOWED_DATABASES`: `ledgerline` (required when `APP_ENV=production`).
+- `DB_APP_PASSWORD`: Password for `ledgerline_app` runtime role.
+- `DB_MIGRATOR_PASSWORD`: Password for `ledgerline_migrator` migration role.
+
+### Image Build Commands
+Build all container images from scratch:
+```powershell
+docker compose build
+```
+Or build backend and frontend individually:
+```powershell
+docker build -t ledgerline-backend ./backend
+docker build -t ledgerline-frontend ./frontend
+```
+
+### Local Container Startup
+Start the application stack in the background:
+```powershell
+docker compose up -d
+```
+Verify container health status:
+```powershell
+docker compose ps
+```
+
+### Separate Database Migration Execution
+In accordance with three-tier least privilege, database schema migrations must be executed explicitly by an authorized release operator using the `migrator` ops profile:
+```powershell
+docker compose run --rm migrator
+```
+
+### Health Check Verification
+Verify operational status across endpoints:
+- Frontend Gateway (Nginx Reverse Proxy): `curl -f http://localhost:3000/health`
+  *Returns:* `{"status": "healthy", "service": "ledgerline"}`
+- Frontend Web Root: `curl -f http://localhost:3000/`
+- API Interactive Documentation: [http://localhost:3000/docs](http://localhost:3000/docs)
+- Direct Backend Engine (when running standalone uvicorn outside Docker): `curl -f http://localhost:8000/health`
+  *Note: Under Docker Compose, backend port 10000 is isolated within the internal bridge network and accessed securely through the Nginx gateway.*
+
+### Stopping Containers Without Data Loss
+To stop running containers while safely preserving database volumes and state:
+```powershell
+docker compose down
+```
+> ⚠️ **CAUTION:** Never execute `docker compose down -v` unless an intentional wipe of all persistent PostgreSQL database data is explicitly desired.
+
+## Render Free-Tier Deployment Architecture
+
+LedgerLine is prepared for deployment on Render Free Tier using Infrastructure-as-Code blueprint [`render.yaml`](render.yaml) and documented in the step-by-step [Render Deployment Guide](docs/render_deployment_guide.md). The deployment uses a three-service topology:
+
+1. **Frontend Web Service (Docker)**: React SPA served via Nginx 1.26 Alpine.
+   - **Dynamic Port**: Listens on `$PORT` assigned by Render (defaults to 10000 on Render, 80 in local Docker Compose).
+   - **Same-Origin API Design**: The browser client exclusively accesses the frontend's origin (e.g., `https://ledgerline-frontend.onrender.com`). Nginx reverse-proxies `/auth`, `/me`, `/accounts`, `/transactions`, `/admin`, and `/health` requests to the backend.
+   - **Public Suffix List & Cookie Isolation**: Because `onrender.com` is on Mozilla's Public Suffix List, distinct subdomains (`frontend.onrender.com` and `backend.onrender.com`) are cross-site origins. By keeping all browser requests on the same frontend origin, Nginx preserves First-Party `SameSite=Lax` cookie delivery and CSRF origin verification without requiring insecure `SameSite=None` relaxation.
+   - **HTTPS SNI Upstream Proxy**: Nginx proxies to the backend's public HTTPS URL configured via `BACKEND_PUBLIC_URL` (e.g. `https://ledgerline-backend.onrender.com`). It validates TLS using `/etc/ssl/certs/ca-certificates.crt`, passes upstream SNI via `proxy_ssl_server_name on;`, and sanitizes any trailing slashes automatically via `18-sanitize-backend-url.envsh`.
+
+2. **Backend Web Service (Docker)**: FastAPI ASGI application running under Uvicorn in a non-root container (`10001:10001`).
+   - **Dynamic Port**: Binds to `0.0.0.0:$PORT` (defaults to 10000 on Render and fallback).
+   - **Fail-Closed Security**: In production (`APP_ENV=production`), enforces strict database allowlisting (`DB_ALLOWED_HOSTS`, `DB_ALLOWED_DATABASES`), session secret strength ($\ge 32$ chars), `COOKIE_SECURE=true`, and least-privilege runtime role `ledgerline_app`.
+   - **Proxy Trust Boundary**: `FORWARDED_ALLOW_IPS` defaults fail-closed (`127.0.0.1,172.28.1.10`). Because Render does not publish static edge proxy IP ranges, trust in arbitrary forwarded headers is withheld to prevent client-IP spoofing.
+
+3. **Managed PostgreSQL Database (Render PostgreSQL)**:
+   - Dedicated managed PostgreSQL instance.
+   - Accessed by backend services over Render's private internal network (`dpg-xxxxxx-a:5432`).
+
+### Required Render Environment Variables
+
+| Variable | Service | Secret | Format / Description |
+|---|---|---|---|
+| `APP_ENV` | Backend | No | `production` |
+| `PORT` | Backend & Frontend | No | System-injected by Render (e.g. `10000`) |
+| `DATABASE_URL` | Backend | Yes | `postgresql://ledgerline_app:<password>@<internal-host>:5432/<db_name>` |
+| `MIGRATION_DATABASE_URL` | Backend (Pre-Deploy) | Yes | `postgresql://ledgerline_migrator:<password>@<internal-host>:5432/<db_name>` |
+| `DB_ALLOWED_HOSTS` | Backend | No | Render internal host (e.g. `dpg-xxxxxx-a`) |
+| `DB_ALLOWED_DATABASES` | Backend | No | Target database name (must not contain `test`) |
+| `DB_ALLOWED_PORTS` | Backend | No | `5432` |
+| `SESSION_SECRET` | Backend | Yes | High-entropy string $\ge 32$ chars |
+| `COOKIE_SECURE` | Backend | No | `true` |
+| `CORS_ORIGINS` | Backend | No | Frontend public URL (e.g. `https://ledgerline.onrender.com`) |
+| `BACKEND_PUBLIC_URL` | Frontend | No | Backend public URL (e.g. `https://ledgerline-backend.onrender.com`) |
+
+### Operational Considerations & Limitations
+
+- **Free-Tier Cold Starts**: Free Render Web Services automatically spin down after 15 minutes of inactivity. Incoming requests to an inactive service may experience a 50+ second cold-start delay.
+- **Render PostgreSQL Free Limitations**: Render free-tier databases expire after 30 days and do not include automated backups.
+- **Manual Migration & Role Provisioning Requirement**: Render managed databases provision only a single primary owner. Role separation (`ledgerline_migrator` for DDL, `ledgerline_app` for DML) requires executing an initial provisioning script before the application starts. Migration provisioning has not yet been executed.
 
 ## Live URL
 
@@ -253,4 +397,5 @@ When the backend is running: http://localhost:8000/docs
 
 ## Limitations
 
-*To be documented as development progresses.*
+- **Remote Staging Pending:** While local and staging container orchestration is fully configured, a remote cloud staging deployment (e.g. Render, Railway, AWS ECS) has not yet been provisioned.
+- **Production Secrets Management:** Local orchestration reads environment variables from `.env`; integration with a cloud secret manager (AWS Secrets Manager, HashiCorp Vault) is planned for the cloud production release.

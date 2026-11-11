@@ -877,10 +877,12 @@ def test_settings_production_session_secret_safeguards():
             session_secret="short-secret-under-32-chars",
         )
 
-    # Production with valid 32+ character secret accepted
+    # Production with valid 32+ character secret and explicit allowlists accepted
     prod_settings = Settings(
         app_env="production",
         session_secret="a" * 32,
+        db_allowed_hosts="db.internal.example.com",
+        db_allowed_databases="ledgerline_prod",
     )
     assert prod_settings.app_env == "production"
     assert prod_settings.session_secret == "a" * 32

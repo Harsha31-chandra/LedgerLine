@@ -465,7 +465,7 @@ def get_account_statement(
         select(LedgerEntry, Transaction)
         .join(Transaction, LedgerEntry.transaction_id == Transaction.id)
         .where(LedgerEntry.account_id == account_id)
-        .order_by(LedgerEntry.created_at.asc(), LedgerEntry.id.asc())
+        .order_by(Transaction.created_at.asc(), LedgerEntry.created_at.asc(), Transaction.reference.asc())
     )
     rows = db.execute(stmt).all()
 

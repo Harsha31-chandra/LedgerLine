@@ -95,6 +95,15 @@ export interface AccountCreateRequest {
   owner_user_id?: string
 }
 
+export type AccountType = 'Savings Account' | 'Current Account'
+
+export interface AccountOnboardingRequest {
+  account_name: string
+  currency: string
+  account_type?: string
+  initial_deposit_paise?: number
+}
+
 export interface AccountUpdateRequest {
   account_name: string
 }
@@ -131,4 +140,53 @@ export interface ApiErrorDetail {
 export interface ApiErrorResponse {
   detail?: string | ApiErrorDetail[]
   message?: string
+}
+
+export interface AdminStats {
+  total_users: number
+  total_accounts: number
+  active_accounts: number
+  frozen_accounts: number
+  closed_accounts: number
+  total_portfolio_balance_paise: number
+  total_transactions: number
+}
+
+export interface AdminUser {
+  id: string
+  email: string
+  full_name: string
+  role: UserRole
+  is_active: boolean
+  created_at: string
+  account_count: number
+}
+
+export interface AssignMembershipRequest {
+  account_id: string
+  user_id: string
+  role: MembershipRole
+}
+
+export interface AuditEvent {
+  id: string
+  actor_user_id: string | null
+  actor_email: string | null
+  actor_name: string | null
+  action: string
+  entity_type: string
+  entity_id: string | null
+  event_metadata: Record<string, unknown> | null
+  created_at: string
+  ip_address: string | null
+}
+
+export interface GlobalOverview {
+  total_accounts: number
+  active_accounts: number
+  frozen_accounts: number
+  closed_accounts: number
+  total_portfolio_balance_paise: number
+  total_transactions: number
+  total_ledger_entries: number
 }

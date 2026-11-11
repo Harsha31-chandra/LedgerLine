@@ -35,6 +35,7 @@ from backend.app.models.account_membership import AccountMembership, MembershipR
 from backend.app.models.user import User
 from backend.app.schemas.account import (
     AccountCreateRequest,
+    AccountOnboardingRequest,
     AccountResponse,
     AccountStatusUpdateRequest,
     AccountUpdateRequest,
@@ -43,6 +44,7 @@ from backend.app.schemas.account import (
 from backend.app.services.account_service import (
     change_account_status,
     create_account,
+    create_onboarding_account,
     list_user_accounts,
     update_account_details,
 )
@@ -90,6 +92,52 @@ def create_new_account(
     except InactiveUserError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     except InsufficientRoleError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post(
+    "/onboarding",
+    response_model=AccountWithMembershipResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Self-service account opening for authenticated user",
+)
+def open_onboarding_account(
+    request: Request,
+    payload: AccountOnboardingRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[DbSession, Depends(get_db)],
+) -> AccountWithMembershipResponse:
+    """Create a new financial account for the authenticated user during self-service onboarding.
+
+    Designates the authenticated user as the initial OWNER. Supports optional demo initial deposit
+    strictly in non-production environments with double-entry ledger bookkeeping.
+    """
+    client_ip = request.client.host if request.client else None
+    try:
+        account, membership = create_onboarding_account(
+            db=db,
+            user=current_user,
+            account_name=payload.account_name,
+            currency=payload.currency,
+            initial_deposit_paise=payload.initial_deposit_paise,
+            ip_address=client_ip,
+        )
+        return AccountWithMembershipResponse(
+            id=account.id,
+            account_number=account.account_number,
+            account_name=account.account_name,
+            currency=account.currency,
+            balance=account.balance,
+            status=account.status,
+            created_at=account.created_at,
+            updated_at=account.updated_at,
+            membership_role=MembershipRole(membership.membership_role),
+        )
+    except AuditorReadOnlyViolationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except InactiveUserError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

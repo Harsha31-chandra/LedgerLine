@@ -1,0 +1,17 @@
+# LedgerLine — Development Compose Override
+#
+# PURPOSE:
+#   Binds PostgreSQL service to local loopback (127.0.0.1:5432) for running host-level
+#   automated test suites (e.g. pytest against localhost:5432) and developer tooling.
+#
+# USAGE:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# SECURITY:
+#   Strictly binds to 127.0.0.1 (loopback), NOT 0.0.0.0 (all interfaces).
+#   DO NOT deploy this override file in staging or production environments.
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"

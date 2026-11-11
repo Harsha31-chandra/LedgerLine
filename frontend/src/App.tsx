@@ -4,6 +4,7 @@ import { ProtectedRoute } from './components/ProtectedRoute'
 import { AuthProvider } from './context/AuthContext'
 import { AccountDetailPage } from './pages/AccountDetailPage'
 import { AdminAccountsPage } from './pages/AdminAccountsPage'
+import { AuditorDashboardPage } from './pages/AuditorDashboardPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
@@ -26,7 +27,9 @@ export default function App() {
               <Route element={<ProtectedRoute />}>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/accounts/:accountId" element={<AccountDetailPage />} />
+                <Route path="/admin" element={<AdminAccountsPage />} />
                 <Route path="/admin/accounts" element={<AdminAccountsPage />} />
+                <Route path="/audit" element={<AuditorDashboardPage />} />
               </Route>
 
               {/* 404 Route */}

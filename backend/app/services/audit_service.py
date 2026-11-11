@@ -13,7 +13,47 @@ from sqlalchemy.orm import Session as DbSession
 
 from backend.app.models.audit_event import AuditEvent
 
-__all__ = ["record_audit_event"]
+__all__ = ["SENSITIVE_METADATA_KEYS", "record_audit_event"]
+
+# Comprehensive blocklist of credential and authentication-related metadata keys
+SENSITIVE_METADATA_KEYS: frozenset[str] = frozenset({
+    "password",
+    "token",
+    "raw_token",
+    "access_token",
+    "refresh_token",
+    "password_hash",
+    "token_hash",
+    "authorization",
+    "cookie",
+    "secret",
+    "session_secret",
+    "client_secret",
+    "private_key",
+    "api_key",
+    "credentials",
+})
+
+
+def _sanitize_metadata(data: Any, forbidden_keys: frozenset[str]) -> Any:
+    """Recursively scrub forbidden sensitive keys from dictionary and list structures.
+
+    Normalizes keys via strip().lower().
+
+    LIMITATION NOTE:
+    Key-based sanitization strictly prevents known credential dictionary keys from being
+    persisted. It cannot guarantee removal of secrets accidentally embedded inside
+    unstructured free-form text values (e.g. error strings or description fields).
+    """
+    if isinstance(data, dict):
+        return {
+            k: _sanitize_metadata(v, forbidden_keys)
+            for k, v in data.items()
+            if (k.strip().lower() if isinstance(k, str) else str(k).lower()) not in forbidden_keys
+        }
+    if isinstance(data, list):
+        return [_sanitize_metadata(item, forbidden_keys) for item in data]
+    return data
 
 
 def record_audit_event(
@@ -41,9 +81,7 @@ def record_audit_event(
     """
     clean_metadata: dict[str, Any] | None = None
     if metadata:
-        # Sanitize sensitive fields if accidentally included
-        forbidden_keys = {"password", "token", "raw_token", "password_hash", "token_hash"}
-        clean_metadata = {k: v for k, v in metadata.items() if k.lower() not in forbidden_keys}
+        clean_metadata = _sanitize_metadata(metadata, SENSITIVE_METADATA_KEYS)
 
     event = AuditEvent(
         actor_user_id=actor_user_id,

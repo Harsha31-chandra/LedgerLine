@@ -1,0 +1,72 @@
+# LedgerLine — Render Blueprint Specification (Infrastructure-as-Code)
+# Reference: https://render.com/docs/blueprint-spec
+#
+# Topology:
+# 1. Database: Managed PostgreSQL (Render Free tier, 30-day evaluation limit)
+# 2. Backend Web Service: Dockerized FastAPI (Python 3.12, Uvicorn, port 10000)
+# 3. Frontend Web Service: Dockerized Nginx + React SPA (Vite, same-origin API proxy)
+
+version: "1"
+
+databases:
+  - name: ledgerline-db
+    databaseName: ledgerline
+    user: ledgerline
+    plan: free
+    region: oregon
+    ipAllowList: [] # Allows access only from Render services in the same account
+
+services:
+  # ── Backend Web Service (FastAPI) ──
+  - type: web
+    name: ledgerline-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DB_ALLOWED_PORTS
+        value: "5432"
+      - key: SESSION_COOKIE_NAME
+        value: ledgerline_session
+      - key: SESSION_TTL_MINUTES
+        value: "1440"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: SESSION_SECRET
+        generateValue: true
+      # Database connection & allowlists (configured after initial role setup)
+      - key: APP_DATABASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_ALLOWED_HOSTS
+        sync: false
+      - key: DB_ALLOWED_DATABASES
+        value: ledgerline
+      - key: CORS_ORIGINS
+        sync: false
+
+  # ── Frontend Web Service (Nginx Reverse Proxy + React SPA) ──
+  - type: web
+    name: ledgerline-frontend
+    runtime: docker
+    dockerfilePath: frontend/Dockerfile
+    dockerContext: frontend
+    plan: free
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "80"
+      # Points to backend public URL: https://ledgerline-backend.onrender.com
+      - key: BACKEND_PUBLIC_URL
+        sync: false

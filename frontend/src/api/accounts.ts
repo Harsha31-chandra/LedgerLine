@@ -2,6 +2,7 @@ import { apiClient } from './client'
 import type {
   Account,
   AccountCreateRequest,
+  AccountOnboardingRequest,
   AccountStatusUpdateRequest,
   AccountUpdateRequest,
   AccountWithMembership,
@@ -27,6 +28,15 @@ export async function getAccount(accountId: string): Promise<AccountWithMembersh
 
 export async function createAccount(payload: AccountCreateRequest): Promise<AccountWithMembership> {
   return apiClient<AccountWithMembership>('/accounts', {
+    method: 'POST',
+    body: payload,
+  })
+}
+
+export async function onboardAccount(
+  payload: AccountOnboardingRequest,
+): Promise<AccountWithMembership> {
+  return apiClient<AccountWithMembership>('/accounts/onboarding', {
     method: 'POST',
     body: payload,
   })

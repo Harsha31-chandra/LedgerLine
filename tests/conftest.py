@@ -43,6 +43,7 @@ __all__ = [
     "enforce_test_database_isolation",
     "is_postgres_service_reachable",
     "sanitize_database_error_message",
+    "app_test_engine",
     "test_engine",
 ]
 
@@ -136,6 +137,57 @@ def test_engine() -> Generator[Engine, None, None]:
         pytest.fail(
             f"PostgreSQL connection to '{safe_url_str}' failed due to database or "
             f"authentication misconfiguration: {sanitized_reason}"
+        )
+
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+@pytest.fixture(scope="session")
+def app_test_engine() -> Generator[Engine, None, None]:
+    """Provide a verified engine connected to ledgerline_test as runtime role ledgerline_app.
+
+    Enforces isolation safety, verifies credentials and permissions, and disposes
+    the pool on teardown.
+    """
+    assert_test_database_url_safety(settings.app_test_database_url)
+    parsed = make_url(settings.app_test_database_url)
+    safe_url_str = parsed.render_as_string(hide_password=True)
+
+    if (parsed.drivername or "").lower().startswith("sqlite"):
+        engine = create_engine(settings.app_test_database_url)
+        try:
+            with engine.connect():
+                pass
+        except Exception as exc:
+            engine.dispose()
+            pytest.fail(f"SQLite test database connection to '{safe_url_str}' failed: {exc}")
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+        return
+
+    host = parsed.host or "localhost"
+    port = parsed.port or APPROVED_POSTGRES_PORT
+
+    if not is_postgres_service_reachable(host, port):
+        pytest.skip(
+            f"PostgreSQL service unreachable at {host}:{port}. "
+            "Skipping environment-dependent integration test."
+        )
+
+    engine = create_engine(settings.app_test_database_url, pool_pre_ping=True)
+    try:
+        with engine.connect():
+            pass
+    except Exception as exc:
+        engine.dispose()
+        raw_pass = str(parsed.password) if parsed.password else None
+        sanitized_reason = sanitize_database_error_message(exc, raw_pass)
+        pytest.fail(
+            f"PostgreSQL connection to '{safe_url_str}' as app role failed: {sanitized_reason}"
         )
 
     try:
